@@ -175,13 +175,13 @@ class KeyboardController(Node):
                             self.arm_joint_positions[3] - self.max_delta, -1.5
                         )
                         self.arm_joint_positions[3] = new_pos
-                    elif key == 'p':  # Close gripper
+                    elif key == 'o':  # Open gripper
                         new_pos = min(
                             self.gripper_position + self.gripper_delta, self.gripper_max
                         )
                         self.gripper_position = new_pos
                         self.send_gripper_command()
-                    elif key == 'o':  # Open gripper
+                    elif key == 'p':  # Close gripper
                         new_pos = max(
                             self.gripper_position - self.gripper_delta, self.gripper_min
                         )
