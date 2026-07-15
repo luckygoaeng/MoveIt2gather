@@ -86,6 +86,29 @@ ros2 topic echo /joint_states
 
 **조치**: 로봇 교체로 해결. (5축 전체가 동시에 응답 끊기는 패턴이라 그리퍼 unit info 값과는 다른 레이어의 문제였음 — 코드 수정과 무관)
 
+## Stage 3 — ArUco 마커 인식 (`ros2-aruco-pose-estimation`)
+
+`AIRLab-POLIMI/ros2-aruco-pose-estimation`은 Humble/Iron 공식 지원이라 Jazzy에서 그대로 쓰면 막히는 지점이 여러 곳 있었습니다. 실제로 겪은 순서대로 정리했습니다.
+
+| # | 증상 | 원인 | 해결 |
+| --- | --- | --- | --- |
+| 1 | `rosdep install` 시 `Cannot locate rosdep definition for [tf2_transformations]` | 업스트림 `aruco_pose_estimation/package.xml`에 `tf2_transformations`로 오타(실제 import는 `tf_transformations`, rosdep 키도 `tf_transformations`만 존재) | `rosdep install --skip-keys "tf2_transformations"` 후 `sudo apt install ros-jazzy-tf-transformations` 별도 설치 |
+| 2 | `rosdep install` 시 `Cannot locate rosdep definition for [open3d]` | `package.xml`에 `open3d` 의존성이 선언돼 있으나 실제 코드(`aruco_node.py`, `pose_estimation.py`, `utils.py`) 어디서도 import 안 함, `CMakeLists.txt`의 `find_package(open3d)`도 주석 처리됨 — RGB-only 사용 시 불필요 | `rosdep install --skip-keys "open3d"`로 무시 (설치 자체가 불필요) |
+| 3 | `aruco_node.py` 실행 시 `AttributeError: module 'cv2.aruco' has no attribute 'ArucoDetector'` | 코드가 OpenCV 4.7.0+의 `cv2.aruco.ArucoDetector` API를 쓰는데, apt `python3-opencv`는 4.6.0 | `pip3 install opencv-contrib-python==4.10.0.84 --break-system-packages`로 신버전 설치 (site-packages 우선순위상 apt판을 가림) |
+| 4 | 위 pip 설치 직후 `scipy`가 `UserWarning: A NumPy version >=1.21.6 and <1.28.0 is required` | `opencv-contrib-python` 최신판(5.x)이 의존성으로 `numpy>=2`를 강제 설치하면서 시스템 numpy(1.26.4, apt)를 사용자 site-packages의 2.5.1로 덮어씀 — `moveit_py` 등 numpy C-API를 쓰는 다른 노드까지 깨질 수 있는 위험한 상태였음 | `pip3 install "numpy<2" "opencv-contrib-python==4.10.0.84" --break-system-packages`로 버전 고정 (4.10.0.84는 ArucoDetector 있으면서 numpy 1.x와도 호환) |
+| 5 | `camera_calibration` GUI 실행 시 `cv2.error: ... Rebuild the library with Windows, GTK+ 2.x or Cocoa support` | `opencv-contrib-python-headless`(GUI 기능 없는 빌드)를 설치했었음 — `aruco_node.py`는 GUI가 필요 없어 문제없었지만 `cameracalibrator`의 `cv2.namedWindow`에서 크래시 | headless를 지우고 GUI 포함판 `opencv-contrib-python`(같은 4.10.0.84)으로 교체 |
+| 6 | 패키지 동봉 `aruco_pose_estimation.launch.py`를 그대로 실행하면 `realsense2_camera` 관련 에러로 launch 자체가 실패 | 이 launch 파일은 `use_depth_input` 값과 무관하게 RealSense 카메라(`realsense2_camera`의 `rs_launch.py`)를 항상 include하도록 작성돼 있음 — usb_cam 조합을 고려 안 함 | launch 파일을 쓰지 않고 `ros2 run aruco_pose_estimation aruco_node.py --ros-args -p ...`로 노드를 직접 실행, 필요한 파라미터만 CLI로 override |
+| 7 | 위와 같이 직접 실행하면 카메라 정보가 계속 안 들어와서(`No camera info has been received!`) `/aruco_poses`가 영원히 안 나옴 | `camera_info_topic` 기본값이 `/camera/color/camera_info`(RealSense용)인데 usb_cam은 `/camera_info`로 발행 | `-p camera_info_topic:=/camera_info`로 명시적 override 필수 |
+| 8 | 마커가 잡혀도 `numpy.linalg.LinAlgError: Matrix is not positive definite` (`tf_transformations.quaternion_from_matrix` 내부)로 노드 크래시 | usb_cam이 캘리브레이션 파일 없이 뜨면 `camera_info`의 K행렬이 전부 0으로 발행됨 — 이 상태로 `solvePnP` 결과가 유효한 회전행렬이 아니게 되어 쿼터니언 변환이 수학적으로 실패 | 체커보드 캘리브레이션으로 실제 K/D를 확보하기 전까지는 pose 발행이 원천적으로 불가능. 아래 캘리브레이션 항목 참고 |
+| 9 | `ros2 run camera_calibration cameracalibrator ...` 실행 후 `Waiting for service camera/set_camera_info ...`에서 멈춤 | 도구가 기본으로 찾는 서비스명(`camera/set_camera_info`)이 usb_cam이 실제로 광고하는 서비스명(`/usb_cam/set_camera_info`)과 다름 | `-r camera/set_camera_info:=/usb_cam/set_camera_info` remap 추가 |
+| 10 | 체커보드를 아무리 움직여도 게이지(X/Y/Size/Skew)가 하나도 안 참 | `--size`는 **내부 코너 개수** 기준인데 보드의 "사각형 칸 수"(9x7)를 그대로 넣었음 | 칸 수가 아니라 `(칸 수-1)`로 변환해서 `--size 8x6` 사용 |
+| 11 | 마커까지 거리(z)가 실제와 정확히 2배 차이남 | `marker_size` 파라미터를 실측(0.058m) 대신 임시값(0.1m)으로 넣고 테스트함 — `solvePnP`는 지정한 마커 크기를 기준으로 거리를 역산하므로, 크기를 실제보다 N배로 잘못 알려주면 거리도 N배로 그대로 스케일됨 | `marker_size`를 실측값으로 정확히 맞춰야 함 (자로 잴 때 흰 여백 제외, 검은 패턴 사각형 한 변만) |
+| 12 | `ros2 run aruco_pose_estimation generate_aruco_marker.py`가 `No executable found` | 마커 생성 스크립트가 업스트림에 없어서 새로 작성했는데, 실행 권한(`chmod +x`)을 빼먹으면 `install(PROGRAMS ...)`로 설치돼도 ament 실행파일 인덱스에 등록 안 됨 | `chmod +x scripts/generate_aruco_marker.py` 후 재빌드 |
+
+**남은 정밀도 이슈 (미해결, MoveIt2 연동 전 개선 필요)**: 체커보드 캘리브레이션(8x6, 24mm) 후 실측 30cm/60cm 지점에 마커를 두고 `/aruco_poses`의 z값을 비교하면 각각 25.7cm(-14%), 48.3cm(-20%)로 **일관되게 짧게** 측정됨. 두 지점 모두 반복 측정 시 노이즈는 거의 없어(±1mm 이내) 정밀도(precision) 자체는 좋으나, 정확도(accuracy)에 스케일성 오차가 있음 — `marker_size` 측정 기준 재확인, 그리고 체커보드를 화면 전역(구석·다양한 각도)에 더 많이 채워서 캘리브레이션을 재실행해볼 것.
+
+**참고**: C920을 usb_cam에 물릴 때 `/dev/video2`가 실제 캡처 노드였음 (`/dev/video3`는 메타데이터 전용이라 `cv2.VideoCapture`로 열리지 않는 게 정상). 1280x720/30Hz로 요청해도 실제 관측 프레임레이트는 ~7.5Hz 수준이었음 (MJPEG 디코딩 오버헤드로 추정, 원인 미조사).
+
 ## 일반 참고
 
 - `emanual.robotis.com` 문서는 일부 outdated 되어 있으므로 실제 패키지 소스 및 실험으로 교차 검증이 필요합니다.
