@@ -26,6 +26,13 @@ def main():
                          help="cv2.aruco dictionary name, e.g. DICT_5X5_250.")
     parser.add_argument("--output-dir", type=str, default=".", help="Directory to save the marker image.")
     parser.add_argument("--border-bits", type=int, default=1, help="Width of the marker border in bits.")
+    parser.add_argument(
+        "--margin", type=int, default=None,
+        help="White quiet-zone margin in pixels added around the marker on all "
+             "four sides. Detection relies on finding a black-to-white "
+             "transition at the marker edge, so this is required when mounting "
+             "on a dark surface. Defaults to 25%% of --size."
+    )
     args = parser.parse_args()
 
     if not hasattr(cv2.aruco, args.dictionary):
@@ -33,6 +40,12 @@ def main():
 
     dictionary = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, args.dictionary))
     marker_image = cv2.aruco.generateImageMarker(dictionary, args.id, args.size, borderBits=args.border_bits)
+
+    margin = args.margin if args.margin is not None else args.size // 4
+    if margin > 0:
+        marker_image = cv2.copyMakeBorder(
+            marker_image, margin, margin, margin, margin,
+            cv2.BORDER_CONSTANT, value=255)
 
     os.makedirs(args.output_dir, exist_ok=True)
     output_path = os.path.join(args.output_dir, f"marker_{args.dictionary}_id{args.id}.png")

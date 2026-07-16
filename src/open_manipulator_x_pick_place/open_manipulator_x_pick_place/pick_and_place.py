@@ -83,8 +83,11 @@ def build_moveit_py(node_name: str) -> MoveItPy:
     }
     # Default kinematics_solver_timeout (5ms) is too short for KDL's
     # numerical IK to converge reliably on this 4-DOF position-only chain.
-    # Override here only; the yaml file is untouched.
-    moveit_config['robot_description_kinematics']['arm']['kinematics_solver_timeout'] = 0.05
+    # Override here only; the yaml file is untouched. Bumped 0.05 -> 0.1:
+    # near-boundary-of-reach pose goals (Stage 3 ArUco pick-and-place) were
+    # intermittently failing IK sampling even for targets within ~1cm of an
+    # already-proven-reachable point.
+    moveit_config['robot_description_kinematics']['arm']['kinematics_solver_timeout'] = 0.1
     return MoveItPy(node_name=node_name, config_dict=moveit_config)
 
 

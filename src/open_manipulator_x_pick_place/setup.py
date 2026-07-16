@@ -21,6 +21,8 @@ setup(
     entry_points={
         'console_scripts': [
             'pick_and_place = open_manipulator_x_pick_place.pick_and_place:main',
+            'calibrate_camera_to_base = open_manipulator_x_pick_place.calibrate_camera_to_base:main',
+            'pick_and_place_aruco = open_manipulator_x_pick_place.pick_and_place_aruco:main',
         ],
     },
 )

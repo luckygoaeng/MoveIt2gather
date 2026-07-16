@@ -109,6 +109,26 @@ ros2 topic echo /joint_states
 
 **참고**: C920을 usb_cam에 물릴 때 `/dev/video2`가 실제 캡처 노드였음 (`/dev/video3`는 메타데이터 전용이라 `cv2.VideoCapture`로 열리지 않는 게 정상). 1280x720/30Hz로 요청해도 실제 관측 프레임레이트는 ~7.5Hz 수준이었음 (MJPEG 디코딩 오버헤드로 추정, 원인 미조사).
 
+## Stage 3 후속 — 자동 캘리브레이션 + ArUco Pick-and-Place (`calibrate_camera_to_base` / `pick_and_place_aruco`)
+
+실제로 겪은 순서대로 정리했습니다.
+
+| # | 증상 | 원인 | 해결 |
+| --- | --- | --- | --- |
+| 1 | `usb_cam_node_exe`가 포맷 목록 출력 직후 `terminate called after throwing an instance of 'char*'`로 크래시 | `pixel_format` 파라미터를 지정 안 하면 드라이버가 포맷 협상에 실패 | `-p pixel_format:=yuyv` 명시 |
+| 2 | ArUco pose의 z값이 실제보다 크게 틀어짐 (marker_size는 이미 정확한데도) | `~/.ros/camera_info/default_cam.yaml` 캘리브레이션이 1280x720 기준인데 usb_cam 기본 해상도는 640x480 — 카메라 내부 파라미터와 실제 이미지 크기 불일치 | `-p image_width:=1280 -p image_height:=720`으로 캘리브레이션 파일과 맞춤 |
+| 3 | `aruco_pose_estimation.launch.py` 실행 시 `realsense2_camera` 관련 예외로 launch 전체가 죽고, 안에서 막 뜬 `aruco_node.py`까지 같이 종료 | 이 launch 파일은 `use_depth_input` 값과 무관하게 RealSense 카메라를 항상 include하려 시도 (usb_cam 조합 미고려) | launch 파일 대신 `ros2 run aruco_pose_estimation aruco_node.py --ros-args -p ...`로 노드 직접 실행 |
+| 4 | `ros2 topic echo /aruco/markers`(슬래시 표기)에 아무것도 안 뜨는데 `/aruco_image`(rqt)에는 초록 바운딩 박스가 뜸 | `aruco_node.py`의 `declare_parameter` 기본값은 `/aruco_markers`(언더스코어)인데, `aruco_parameters.yaml`은 `/aruco/markers`(슬래시)로 재정의함 — launch 파일 없이 노드를 직접 실행하면 yaml이 아예 안 읽혀서 코드 기본값(언더스코어)이 그대로 적용됨 | 실제 발행 토픽인 `/aruco_markers`, `/aruco_image`, `/aruco_poses`(전부 언더스코어)로 구독 |
+| 5 | 그리퍼에 마커를 붙였는데 카메라에 보이는데도 `/aruco_markers`에 안 찍힘 | 마커 배경(그리퍼)이 검정이라 마커 자체 테두리(검정)와 배경이 합쳐져서 사각형 윤곽 검출 실패 — ArUco 인식은 검정 테두리 바깥의 흰색 여백(quiet zone)과의 대비가 필수 | `generate_aruco_marker.py --margin <px>` 옵션(기본 `--size`의 25%)으로 흰 여백을 두른 마커 재생성 |
+| 6 | `tf2_ros.Buffer.transform()`에서 `"world" passed to lookupTransform argument target_frame does not exist` — 캘리브레이션 노드가 분명히 살아있는데도 실패 | `Buffer.can_transform()`/`transform()`은 `timeout` 동안 `sleep(0.02)`로 busy-wait만 하고 노드를 spin하지 않는 알려진 제약(ros2/geometry2 #327) — TF가 아직 안 왔으면 timeout을 아무리 늘려도 절대 못 받음 | `can_transform()`이 참이 될 때까지 `rclpy.spin_once()`를 직접 반복 호출한 뒤에 `transform()` 호출 |
+| 7 | 캘리브레이션을 몇 번을 다시 돌려도 계산된 물체 좌표의 z가 재현 가능하게(랜덤이 아니게) 도달 불가능한 범위로 나옴 | ID 0 마커가 `end_effector_link` 원점이 아니라 그리퍼 표면(실측 약 8cm, EE 로컬 -x 방향)에 붙어 있어서, 웨이포인트마다 그리퍼가 회전하면 이 물리적 오프셋도 같이 회전 → TCP=마커라는 강체 변환 가정이 깨짐 | FK의 orientation까지 읽어서 `TCP위치 + R(TCP방향) @ 오프셋벡터`로 마커의 실제 world 좌표를 역산한 뒤 Kabsch에 사용 (`MARKER_OFFSET_IN_EE_FRAME`) |
+| 8 | `moveit_x_moveit.launch.py`(RViz+`move_group`)를 켜둔 채로 `moveit_py` 스크립트(캘리브레이션/pick-and-place, **Stage 2 원본 `pick_and_place.py`로도 재현됨**)를 실행하면 어떤 좌표를 목표로 잡든 `Unable to sample any valid states for goal tree`로 항상 실패 | `moveit_py`는 `move_group`에 붙는 클라이언트가 아니라 독립된 두 번째 planning 파이프라인을 내장함 — 두 개의 planning scene 추적기가 동시에 떠서 충돌 | `moveit_py` 스크립트를 돌릴 땐 moveit launch를 켜지 말고 브링업만 켜둘 것 |
+| 9 | Stage2 검증 좌표와 1cm 이내로 가까운 좌표인데도 pre-grasp가 계속 `Unable to sample any valid states for goal tree`로 실패 (moveit launch를 꺼도 재현) | `arm`은 position-only IK라 여유자유도 1개 — OMPL이 pose 목표에 대해 자체적으로 고르는 IK 시드가 자꾸 자기충돌 해로 수렴함 (Stage2가 pre-place/place에서 이미 겪어서 관절값 목표로 우회했던 것과 동일 증상, 카메라 좌표는 미리 손교시할 수 없어 그 우회가 불가능했음) | `RobotState.set_from_ik()`를 home 자세 시드로 직접 호출해 관절값을 구한 뒤 `move_arm_to_joint_positions()`로 실행 (OMPL의 자체 IK 샘플링 우회) — `move_arm_to_pose_seeded()` |
+| 10 | 위 수정 후에도 이따금 IK 실패 | `kinematics_solver_timeout` 50ms가 경계 자세 근처에서 여유 부족 | 100ms로 상향 (`pick_and_place.py`의 `build_moveit_py()`, 세 스크립트 공용) |
+| 11 | 계산된 좌표로 이동은 잘 되는데 그리퍼가 물체를 살짝 빗나가서(수 cm) 잘 못 집음 | depth 카메라 없이 단안(monocular) `solvePnP`만으로 위치 추정 — 마커 부착 위치와 실제 그립 지점 사이 물체별 오차가 항상 존재 | `GRASP_X_OFFSET`/`GRASP_Y_OFFSET`/`GRASP_Z_OFFSET`(`pick_and_place_aruco.py`)을 실물 테스트로 경험적으로 튜닝 |
+
+**참고 (우리 코드 문제 아님)**: 이 워크스테이션은 다른 랩 프로젝트(Doosan 로봇 `dsr01` 네임스페이스, 스테레오 카메라 캘리브레이션 리그)와 기본 `ROS_DOMAIN_ID`를 공유하고 있어서, `ros2 node list`/`ros2 topic list`에 무관한 노드·토픽이 섞여 나옵니다. 디버깅 중 낯선 노드가 보이면 이것부터 의심할 것 — 특히 카메라 장치(`/dev/videoN`) 파라미터가 겹치면 실제 충돌도 납니다 (`ros2 topic info <topic> -v`로 퍼블리셔 노드 확인).
+
 ## 일반 참고
 
 - `emanual.robotis.com` 문서는 일부 outdated 되어 있으므로 실제 패키지 소스 및 실험으로 교차 검증이 필요합니다.
