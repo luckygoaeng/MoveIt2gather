@@ -5,7 +5,7 @@
 
 - **대상 하드웨어**: OpenManipulator-X (4축), OpenCR 제어보드
 - **소프트웨어**: Ubuntu 24.04 LTS, ROS 2 Jazzy Jalisco, MoveIt 2
-- **완료 상태**: Stage 1 (텔레오퍼레이션) ✅ · Stage 2 (MoveIt2 pick-and-place) ✅ · Stage 3 (ArUco 인식 파이프라인) ✅ · Stage 3 후속 (자동 캘리브레이션 + ArUco pick-and-place, v3) ✅
+- **완료 상태**: Stage 1 (텔레오퍼레이션) ✅ · Stage 2 (MoveIt2 pick-and-place) ✅ · Stage 3 (ArUco 인식 파이프라인) ✅ · Stage 3 후속 (자동 캘리브레이션 + ArUco pick-and-place, v3) ✅ · Stage 4 준비 (젯슨 오린 나노 초기 환경 구축) ✅
 
 ---
 
@@ -444,7 +444,76 @@ ros2 run open_manipulator_x_pick_place pick_and_place_aruco
 
 ---
 
-## 7. 데모 영상
+## 7. 4단계 준비 — 젯슨 오린 나노 초기 환경 구축
+
+Stage 4(온보드 VLA)에 들어가기 전, 젯슨 오린 나노 Super Developer Kit(8GB)를 개봉 상태에서 SSH 원격 접속이 가능한 상태까지 세팅합니다. 이 절차를 마치면 모니터·키보드 없이 노트북에서 젯슨을 원격으로 다룰 수 있습니다.
+
+### 준비물
+
+- Jetson Orin Nano Super Developer Kit (8GB, P3767-0005 모듈 + P3768-0000 캐리어보드)
+- microSD 64GB 이상 UHS-1 권장 (32GB로도 설치는 가능하나 여유 공간이 타이트함)
+- USB 플래시드라이브 16GB 이상 (설치 미디어용 — JetPack 7.2부터 SD카드 이미지 방식 지원 종료)
+- DisplayPort 케이블 또는 DP-HDMI 어댑터 (젯슨은 DP 출력만 지원, USB-C/HDMI 자체 출력 없음)
+- Ubuntu 24.04 호스트 노트북
+
+### JetPack 버전 선택: 7.2 (6.2.1이 아닌 이유)
+
+ROS 2 Jazzy의 공식 Tier 1 지원 플랫폼은 **Ubuntu 24.04**입니다. JetPack 6.2.1은 Ubuntu 22.04 rootfs라 Jazzy를 공식 지원하지 않는 반면, JetPack 7.2는 Ubuntu 24.04 rootfs로 Jazzy를 공식 지원하고 노트북 OS 버전과도 일치합니다. 따라서 최신 버전인 JetPack 7.2를 선택했습니다.
+
+참고로 JetPack 7.2는 출시 초기라 일부 서드파티 도구(jetson-containers, prebuilt PyTorch wheel 등)가 아직 CUDA 13.2 기준으로 완전히 따라오지 못한 상태입니다. Stage 4 본편(VLA 추론) 진행 시 GPU가 실제로 사용되는지 재검증이 필요합니다.
+
+### 절차
+
+**1. UEFI 펌웨어 버전 확인**
+
+모니터·키보드 연결 후 전원 인가 → 부팅 스플래시에서 Esc 연타 → UEFI 메뉴에서 펌웨어 버전 확인. `36.x` 이상이면 펌웨어 업데이트 없이 바로 진행 가능합니다 (JetPack 7.2 요구사항: JetPack 6.x세대 펌웨어).
+
+**2. JetPack 7.2 ISO 설치 미디어 준비**
+
+NVIDIA JetPack 7.2 페이지에서 Jetson ISO 이미지(arm64)를 다운로드하고, 이미지 굽기 도구로 USB에 씁니다. balenaEtcher에서 문제가 발생하면 GNOME Disks("디스크") 앱을 대안으로 사용합니다.
+
+**3. 젯슨 부팅 & USB에서 설치 실행**
+
+DP 모니터·USB 키보드/마우스·19V 전원을 연결하고, USB 설치미디어와 대상 저장소(microSD) 둘 다 꽂은 채로 부팅합니다. 부팅 스플래시에서 Esc → Boot Manager → USB 디스크를 명시적으로 선택해야 설치가 시작됩니다 (자동 부팅 안 됨).
+
+설치는 microSD 쓰기 속도에 따라 20~30분 이상 걸릴 수 있습니다. 화면이 멈춘 것처럼 보여도 전원을 끊지 말고 대기합니다. 설치 완료 후 "USB 제거" 메시지가 뜨면 제거하고 대상 저장소로 재부팅합니다.
+
+**4. 첫 부팅 초기 설정**
+
+EULA 동의 → 언어/키보드/타임존 → 네트워크(WiFi) → 계정 생성 순으로 진행합니다.
+
+**5. 성능모드 MAXN SUPER 설정**
+
+JetPack 7.2 초기 버전에서는 GUI 전원모드 메뉴에 MAXN SUPER 옵션이 표시되지 않는 알려진 문제가 있습니다. 터미널에서 수동으로 설정합니다:
+
+```bash
+sudo ln -sf /etc/nvpmodel/nvpmodel_p3767_0003_super.conf /etc/nvpmodel.conf
+sudo nvpmodel -m 2
+sudo nvpmodel -q   # MAXN_SUPER 확인
+```
+
+재부팅해도 유지되도록 기본값을 변경합니다:
+
+```bash
+sudo sed -i 's/DEFAULT=0/DEFAULT=2/' /etc/nvpmodel.conf
+sudo reboot
+```
+
+**6. SSH 접속 확인**
+
+젯슨에서 `hostname -I`로 IP를 확인합니다 (여러 IP가 나오는데, WiFi로 할당된 IP만 사용 — `192.168.55.1`은 USB-C 전용, `172.17.0.1`은 Docker 내부용이므로 무시). 노트북에서 같은 네트워크에 연결된 상태로 접속합니다:
+
+```bash
+ssh <계정명>@<젯슨IP>
+```
+
+이 단계를 마치면. 젯슨 오린 나노가 Ubuntu 24.04 + JetPack 7.2 + MAXN SUPER 성능모드로 세팅되고, 노트북에서 SSH로 원격 접속되어 모니터·키보드 없이 이후 작업(ROS 2, CUDA, VLA 모델 설치)을 진행할 수 있습니다.
+
+에러가 나면 [troubleshooting.md](./troubleshooting.md)의 "젯슨 오린 나노 초기 세팅" 항목을 확인하세요.
+
+---
+
+## 8. 데모 영상
 
 | 단계 | 영상 |
 | --- | --- |
