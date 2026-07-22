@@ -199,3 +199,89 @@ WiFi로 할당된 IP만 사용하며, 노트북도 반드시 같은 네트워크
 ```bash
 sudo apt install nvidia-jetpack
 ```
+
+## 젯슨에서 ROS 2 워크스페이스 빌드
+
+> **아키텍처 확정 참고**: Stage 4는 젯슨 단독 온보드(브링업~pick-and-place~VLA 전부 젯슨에서, 노트북은 물리적 연결 없음)로 확정했습니다 (guidebook.md 8.2절). 즉 하드웨어 드라이버·컨트롤러 패키지(`dynamixel_hardware_interface`, `om_gravity_compensation_controller` 등)를 포함한 워크스페이스 전체를 젯슨에서 빌드해야 합니다.
+
+### 최소 설치 이미지라 기본 도구가 없음 (`gedit`/`nano` 없음, `colcon: command not found`, `No CMAKE_CXX_COMPILER could be found`)
+
+JetPack 7.2 이미지는 텍스트 에디터·colcon·`build-essential`/`cmake`조차 기본 포함하지 않습니다. 워크스페이스 작업 시작 전에 한 번에 설치해둡니다.
+
+```bash
+sudo apt update
+sudo apt install build-essential cmake git python3-colcon-common-extensions python3-rosdep nano tmux python3-pip -y
+```
+
+### 레포 클론 후 디렉토리 구조가 `~/ros2_ws/<레포명>/src/...`로 한 겹 더 들어감
+
+레포 이름과 워크스페이스 루트 이름이 달라서 생기는 문제입니다 (`git clone <repo주소>`만 실행하면 `<repo주소>`의 디렉토리명으로 클론됨). `mv <레포명>/* .`로 한 단계 끌어올려도 되지만, 애초에 클론할 때 목적지를 `~/ros2_ws`로 직접 지정하면 깔끔합니다.
+
+```bash
+git clone git@github.com:<계정>/<레포명>.git ~/ros2_ws
+```
+
+### 특정 패키지 하나만 먼저 확인하고 싶을 때 — `--packages-select`
+
+워크스페이스 전체를 빌드하기 전에 특정 패키지 하나가 제대로 빌드되는지만 빠르게 확인하고 싶으면 `--packages-select`로 범위를 좁힐 수 있습니다 (젯슨 단독 온보드 아키텍처상 최종적으로는 전체를 빌드해야 하므로, 이건 어디까지나 디버깅용 임시 축소지 정식 빌드 방식은 아닙니다).
+
+```bash
+colcon build --symlink-install --packages-select <패키지명> --executor sequential --parallel-workers 1
+```
+
+### `colcon build` install 단계에서 "file INSTALL cannot find ...CMakeRelink.dir/lib*.so" 에러
+
+증상: `om_gravity_compensation_controller` 같은 C++ 컨트롤러 패키지에서 `colcon build` 실행 시 실제 컴파일 로그(`Building CXX object` 등) 없이 몇 초 만에 다음 에러로 실패함.
+
+```
+CMake Error at cmake_install.cmake:50 (file):
+  file INSTALL cannot find
+  ".../CMakeFiles/CMakeRelink.dir/libgravity_compensation_controller.so":
+  No such file or directory.
+```
+
+원인: 이전 빌드 시도(특히 병렬 빌드 `--parallel-workers` 기본값)가 젯슨의 제한된 램 때문에 컴파일 도중 중단되면서, `build/<패키지>` 디렉토리에 컴파일은 안 됐는데 캐시 상태만 "빌드 완료"로 남는 경우가 있음. 이후 재빌드 시 make/cmake가 변경 사항이 없다고 판단해 컴파일을 건너뛰고 바로 install 단계로 넘어가버려서, 존재하지 않는 `.so`를 install하려다 실패함.
+
+해결:
+
+```bash
+rm -rf build/<패키지명> install/<패키지명>
+colcon build --packages-select <패키지명> --executor sequential --parallel-workers 1
+```
+
+`build/`, `install/`을 완전히 지우고 순차 빌드로 재시도하면 실제 컴파일이 처음부터 다시 돌면서 해결됨. 워크스페이스 전체를 빌드할 때도 처음부터 `--executor sequential --parallel-workers 1`로 진행하면 이 문제 자체를 예방할 수 있음 (느리지만 안전).
+
+### 워크스페이스 빌드 도중 SD카드 용량 초과
+
+32GB microSD에 JetPack 7.2 + ROS 2 Jazzy + 이 워크스페이스를 설치·빌드하던 중 용량이 바닥나 빌드가 중단됨 (`df -h /` 기준 22G/28G, 82% 사용 시점에 중단 — `nvidia-jetpack` 풀 설치 도중). 빌드 초반에는 여유가 있어 보여도(예: 14GB 남음), 워크스페이스 빌드 산출물 + `nvidia-jetpack` 풀 설치 + 이후 추가할 VLA 패키지(PyTorch 등)까지 감안하면 32GB로는 부족함.
+
+대응: 64GB 이상 microSD로 재설치. 가능하면 Jetson Orin Nano 개발자 키트는 NVMe SSD 부팅을 지원하므로, SD카드보다 NVMe로 전환하는 것을 권장 (용량·속도 모두 이득). 또한 `nvidia-jetpack` 전체 설치 자체를 건너뛸 수 있는 경우가 많음 — 아래 "CUDA 툴킷 풀 설치가 정말 필요한가" 항목 참고.
+
+### CUDA 툴킷(`nvidia-jetpack`) 풀 설치가 정말 필요한가
+
+`nvidia-jetpack` 풀 설치는 CUDA 툴킷+cuDNN+TensorRT를 전부 포함해 수 GB를 차지합니다. 하지만 PyTorch를 pip wheel로 설치하면 wheel 자체에 CUDA 런타임 라이브러리가 포함되어 있어서, **대부분의 경우 시스템 전역 CUDA 툴킷(`nvcc`)이 없어도 GPU 추론이 가능**합니다. `nvcc`(시스템 전역 CUDA 컴파일러)는 PyTorch를 소스에서 직접 빌드해야 하는 경우(예: 아래 sm_87 NaN 이슈로 재빌드가 필요할 때)에만 필요합니다.
+
+디스크가 빠듯하다면 `nvidia-jetpack` 풀 설치는 건너뛰고 먼저 pip wheel로 GPU 인식부터 확인하는 것을 권장합니다.
+
+```bash
+pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu132 --break-system-packages
+python3 -c "import torch; print(torch.cuda.is_available())"
+```
+
+### `torch.cuda.is_available()`은 True인데 transformer 모델 출력이 NaN
+
+JetPack 7.2 + Orin Nano(Super) 조합에서 확인된 이슈입니다. Orin의 컴퓨트 capability(`sm_87`)가 PyTorch 공식 wheel에 명시적으로 포함돼 있지 않아서, 단순 행렬곱(matmul)은 PTX JIT 컴파일로 정상 동작하지만 transformer/diffusion처럼 복잡한 커널에서는 조용히 NaN이 나올 수 있습니다. `torch.cuda.is_available()`이 `True`인 것만으로 GPU가 제대로 동작한다고 판단하지 말고, 실제 forward pass의 NaN 여부까지 확인해야 합니다.
+
+```python
+import torch
+x = torch.rand(1000, 1000).cuda()
+print("matmul 정상:", not torch.isnan(x @ x).any().item())
+
+from transformers import AutoModel, AutoTokenizer
+model = AutoModel.from_pretrained("bert-base-uncased").cuda()
+tok = AutoTokenizer.from_pretrained("bert-base-uncased")
+out = model(**tok("test sentence", return_tensors="pt").to("cuda"))
+print("transformer 정상:", not torch.isnan(out.last_hidden_state).any().item())
+```
+
+여기서 NaN이 나오면 `TORCH_CUDA_ARCH_LIST="8.7"`로 PyTorch를 소스 빌드해야 할 수 있습니다 (SmolVLA/LeRobot 실행 전 반드시 확인 — VLA 추론 자체가 transformer 기반이라 이 이슈에 직접 영향받음).

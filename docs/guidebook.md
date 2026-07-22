@@ -5,7 +5,7 @@
 
 - **대상 하드웨어**: OpenManipulator-X (4축), OpenCR 제어보드
 - **소프트웨어**: Ubuntu 24.04 LTS, ROS 2 Jazzy Jalisco, MoveIt 2
-- **완료 상태**: Stage 1 (텔레오퍼레이션) ✅ · Stage 2 (MoveIt2 pick-and-place) ✅ · Stage 3 (ArUco 인식 파이프라인) ✅ · Stage 3 후속 (자동 캘리브레이션 + ArUco pick-and-place, v3) ✅ · Stage 4 준비 (젯슨 오린 나노 초기 환경 구축) ✅
+- **완료 상태**: Stage 1 (텔레오퍼레이션) ✅ · Stage 2 (MoveIt2 pick-and-place) ✅ · Stage 3 (ArUco 인식 파이프라인) ✅ · Stage 3 후속 (자동 캘리브레이션 + ArUco pick-and-place, v3) ✅ · Stage 4 준비 (젯슨 오린 나노 초기 환경 구축) ✅ · Stage 4 (젯슨 워크스페이스 클론/빌드) 진행 중 — SD카드 용량 초과로 64GB 카드 재설치 후 재개 예정
 
 ---
 
@@ -451,7 +451,7 @@ Stage 4(온보드 VLA)에 들어가기 전, 젯슨 오린 나노 Super Developer
 ### 준비물
 
 - Jetson Orin Nano Super Developer Kit (8GB, P3767-0005 모듈 + P3768-0000 캐리어보드)
-- microSD 64GB 이상 UHS-1 권장 (32GB로도 설치는 가능하나 여유 공간이 타이트함)
+- microSD 64GB 이상 UHS-1 **필수** (32GB로 실제 시도해본 결과, JetPack + ROS 2 Jazzy + 워크스페이스 빌드만으로 용량이 부족해 빌드 도중 중단됨 — VLA 패키지·모델 가중치까지 얹으면 32GB로는 불가능)
 - USB 플래시드라이브 16GB 이상 (설치 미디어용 — JetPack 7.2부터 SD카드 이미지 방식 지원 종료)
 - DisplayPort 케이블 또는 DP-HDMI 어댑터 (젯슨은 DP 출력만 지원, USB-C/HDMI 자체 출력 없음)
 - Ubuntu 24.04 호스트 노트북
@@ -513,7 +513,126 @@ ssh <계정명>@<젯슨IP>
 
 ---
 
-## 8. 데모 영상
+## 8. ROS 2 워크스페이스 클론 & 빌드 (젯슨 단독 온보드) — Day 1~2, SD카드 재설치로 중단
+
+### 8.1 작업 방식 — 헤드리스 SSH
+
+- 젯슨에 모니터·키보드 연결 안 하고 노트북 터미널 → SSH 접속으로 전부 진행. 접속: `ssh csilab@<젯슨 WiFi IP>` (DHCP라 매번 바뀔 수 있음, 안 붙으면 USB-C 직결 `192.168.55.1`로 우회)
+- 긴 작업(빌드·설치)은 tmux 세션 안에서 실행 — SSH가 끊겨도 작업이 죽지 않음
+
+  ```bash
+  sudo apt install tmux -y
+  tmux new -s stage4
+  # 끊기면 재접속 후: tmux attach -t stage4
+  ```
+
+- SSH 터미널 여러 개 동시 접속은 문제없이 확인됨
+
+### 8.2 Stage 4 아키텍처 확정 — 젯슨 단독 온보드 (노트북 완전 분리)
+
+담당 선배 요구사항 확인: 노트북을 로봇팔에 유선 연결해서 뭔가를 처리하는 게 아니라, **엣지 디바이스(젯슨) 하나만 로봇에 연결해서 브링업부터 pick-and-place, VLA 추론까지 전 과정을 젯슨 단독으로 돌리는 것** 자체가 이번 단계의 의미. 노트북은 로봇과의 연결선이 전혀 없고, 기껏해야 SSH로 젯슨을 모니터링하는 용도로만 쓰입니다.
+
+```
+[젯슨: 카메라 + OpenCR 시리얼(팔) 둘 다 연결]
+  → 브링업 (open_manipulator_bringup)
+  → 인식 (ros2-aruco-pose-estimation)
+  → 판단·집기 (MoveIt2 pick-and-place → 이후 VLA로 대체)
+노트북: 물리적 연결 없음 (SSH 원격 모니터링만, 필요 시)
+```
+
+즉 **워크스페이스 전체**(하드웨어 드라이버 `dynamixel_hardware_interface`, `open_manipulator`의 bringup/moveit_config/컨트롤러류, 인식 패키지, pick-and-place 패키지)를 젯슨에서 빌드해야 합니다. OpenCR과 카메라도 실제로 젯슨에 물리적으로 옮겨 연결해야 합니다.
+
+> **정정**: 이 문서에 잠시 "젯슨=카메라+VLA만, 팔 제어는 노트북이 담당하는 분산 구조"로 적었던 버전이 있었는데, 이는 별개 대화에서 요구사항을 잘못 해석해 내린 결론이라 폐기합니다. GUI(`open_manipulator_gui`)·teleop·playground처럼 이 과제 자체에 필수는 아닌 패키지도 있지만, 젯슨 단독 완결성을 위해 워크스페이스 전체를 빌드하는 쪽으로 진행합니다. Day 1에 `om_gravity_compensation_controller` 빌드 문제를 해결한 것도 그대로 유효합니다 (아래 8.5, [troubleshooting.md](./troubleshooting.md) 참고).
+
+### 8.3 GitHub SSH 연동
+
+```bash
+ssh-keygen -t ed25519 -C "jetson-yhy"
+cat ~/.ssh/id_ed25519.pub   # GitHub Settings > SSH keys 에 등록
+ssh -T git@github.com       # 확인
+git config --global user.name "<이름>"
+git config --global user.email "<이메일>"
+```
+
+이후 클론·푸시 시 토큰 입력이 필요 없습니다. **SD카드를 새로 구우면 키가 사라지므로 재발급 필요.**
+
+### 8.4 절차 (재개 시 이 순서 그대로)
+
+```bash
+# 1. 기본 도구 (최소 설치 이미지라 아래 전부 별도 설치 필요)
+sudo apt update
+sudo apt install build-essential cmake git python3-colcon-common-extensions python3-rosdep nano tmux python3-pip -y
+
+# 2. ROS 2 Jazzy (공식 설치 가이드 참고, 섹션 1~6 노트북 설치 절차와 동일)
+sudo apt install ros-jazzy-ros-base -y
+
+# 3. GitHub SSH 키 재설정 (8.3 참고)
+
+# 4. 레포 클론 — 목적지를 ros2_ws로 직접 지정 (레포명 그대로 클론하면 한 겹 더 들어가서 mv로 다시 올려야 함)
+git clone git@github.com:<계정>/MoveIt2gather.git ~/ros2_ws
+cd ~/ros2_ws
+
+# 5. 워크스페이스 전체 빌드 (8.2 아키텍처 기준 — 젯슨 단독 온보드이므로 전체 필요)
+rosdep update
+rosdep install --from-paths src --ignore-src -r -y
+colcon build --symlink-install --executor sequential --parallel-workers 1
+
+# 6. PyTorch — nvidia-jetpack 풀 설치는 건너뛰고 pip wheel부터 (8.6 참고)
+pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu132 --break-system-packages
+python3 -c "import torch; print(torch.cuda.is_available())"
+```
+
+`--executor sequential --parallel-workers 1`을 쓰는 이유: 젯슨 오린 나노는 램이 크지 않아서 여러 패키지를 동시에 컴파일하면 컴파일러가 메모리 부족으로 죽거나 빌드 캐시가 반쯤만 쓰인 채로 남는 문제가 생기기 쉽습니다 (Day 1에 `om_gravity_compensation_controller`에서 실제로 겪음, 8.5·[troubleshooting.md](./troubleshooting.md) 참고). 순차 빌드는 느리지만 안전합니다.
+
+### 8.5 진행 상황 (Day 1~2, 2026-07-22 기준 — 32GB 카드에서, 64GB 재굽기 전)
+
+- `aruco_interfaces`, `dynamixel_interfaces`, `dynamixel_sdk`, `dynamixel_sdk_custom_interfaces`, `open_manipulator_description`, `om_gravity_compensation_controller` — 개별 빌드 성공 확인 (`om_gravity_compensation_controller`는 병렬 빌드 캐시 손상 문제를 `rm -rf build/install` + 순차 재빌드로 해결한 뒤 성공)
+- 워크스페이스 전체 빌드를 진행하기 전, `nvidia-jetpack` 풀 설치(CUDA 툴킷+cuDNN+TensorRT, 수 GB) 시도 중 **32GB microSD 용량 초과(22G/28G, 82% 사용 시점)로 중단**
+- 64GB microSD로 재굽기 결정 (8.6, 8.7, 8.8 참고) — 재개 시 워크스페이스 전체를 8.4의 5번 명령(`--executor sequential`)으로 처음부터 다시 빌드
+
+### 8.6 CUDA / PyTorch 설치 전략
+
+`nvidia-jetpack` 풀 설치(시스템 전역 CUDA 툴킷 `nvcc`, 수 GB)는 **당장은 필요하지 않을 가능성이 높습니다**:
+
+- `pip install torch` wheel 자체가 CUDA 런타임 라이브러리를 함께 설치함
+- 시스템 전역 CUDA 툴킷(`nvcc`)은 PyTorch를 **소스에서 직접 빌드해야 할 때만** 필요 (예: 아래 8.7의 sm_87 커널 갭 문제로 재빌드가 필요한 경우)
+
+재개 시 권장 순서: `nvidia-jetpack` 전체 설치는 건너뛰고, pip wheel로 먼저 GPU 인식 여부를 가볍게 확인합니다 (8.4의 6번 명령).
+
+### 8.7 GPU 검증 시 주의 — JetPack 7.2 특유 이슈
+
+Orin의 컴퓨트 capability(`sm_87`)가 PyTorch 공식 wheel에 명시적으로 포함돼 있지 않아서, 단순 연산(matmul)은 PTX JIT 컴파일로 정상 동작하지만 **transformer/diffusion 같은 복잡한 커널에서 조용히 NaN이 나오는 사례가 확인됨**. `torch.cuda.is_available()`이 `True`인 것만으로 안심하지 말고, 실제 transformer forward pass까지 NaN 체크가 필요합니다:
+
+```python
+import torch
+x = torch.rand(1000, 1000).cuda()
+z = x @ x
+print("matmul 정상:", not torch.isnan(z).any().item())
+
+from transformers import AutoModel, AutoTokenizer
+model = AutoModel.from_pretrained("bert-base-uncased").cuda()
+tok = AutoTokenizer.from_pretrained("bert-base-uncased")
+out = model(**tok("test sentence", return_tensors="pt").to("cuda"))
+print("transformer 정상:", not torch.isnan(out.last_hidden_state).any().item())
+```
+
+여기서 NaN이 나오면 `TORCH_CUDA_ARCH_LIST="8.7"`로 PyTorch를 소스 빌드해야 할 수 있습니다 (시간이 오래 걸리므로 별도 세션으로 계획).
+
+### 8.8 SD카드 재굽기 — 재개 체크리스트
+
+32GB로는 ROS 2 + 워크스페이스 전체 빌드(GUI/컨트롤러 포함) + PyTorch + SmolVLA/LeRobot + 모델 가중치를 다 감당하지 못했습니다. 젯슨 단독 온보드(8.2)로 가는 이상 워크스페이스를 줄일 수 없으므로 카드 용량을 키우는 쪽으로 대응합니다.
+
+- [x] 64GB microSD로 재굽기 결정
+- [ ] 재굽기 (섹션 7 절차 반복) — 이후에도 용량이 계속 빠듯하면 NVMe SSD 부팅 전환 고려 (Jetson Orin Nano 개발자 키트는 NVMe 부팅 지원, 용량·속도 모두 이득)
+- [ ] 재굽기 후 8.4 절차를 처음부터 순서대로 (기본 도구 → ROS 2 → SSH 키 재발급 → 클론 → **워크스페이스 전체 빌드** → PyTorch)
+- [ ] OpenCR·카메라를 노트북에서 뽑아 젯슨에 물리적으로 연결 (8.2 아키텍처 반영)
+- [ ] 설치 명령 하나 돌릴 때마다 `df -h /` 습관적으로 체크 — 특히 워크스페이스 전체 빌드, `nvidia-jetpack`처럼 용량 큰 패키지 설치 전후
+
+에러가 나면 [troubleshooting.md](./troubleshooting.md)의 "젯슨에서 ROS 2 워크스페이스 빌드" 항목을 확인하세요.
+
+---
+
+## 9. 데모 영상
 
 | 단계 | 영상 |
 | --- | --- |
