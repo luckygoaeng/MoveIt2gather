@@ -174,7 +174,7 @@ microSD 쓰기 속도 병목으로 20~30분간 화면이 정지된 것처럼 보
 
 ### MAXN SUPER가 GUI 전원모드 메뉴에 안 뜸
 
-JetPack 7.2 + Orin Nano Super 조합에서 확인된 버그입니다 (NVIDIA 공식 포럼에도 관련 리포트 다수). 터미널에서 다음 명령으로 수동 설정합니다:
+JetPack 7.2 + Orin Nano 조합에서 확인된 버그입니다 (NVIDIA 공식 포럼에도 관련 리포트 다수). 터미널에서 다음 명령으로 수동 설정합니다:
 
 ```bash
 sudo ln -sf /etc/nvpmodel/nvpmodel_p3767_0003_super.conf /etc/nvpmodel.conf
@@ -270,7 +270,7 @@ python3 -c "import torch; print(torch.cuda.is_available())"
 
 ### `torch.cuda.is_available()`은 True인데 transformer 모델 출력이 NaN
 
-JetPack 7.2 + Orin Nano(Super) 조합에서 확인된 이슈입니다. Orin의 컴퓨트 capability(`sm_87`)가 PyTorch 공식 wheel에 명시적으로 포함돼 있지 않아서, 단순 행렬곱(matmul)은 PTX JIT 컴파일로 정상 동작하지만 transformer/diffusion처럼 복잡한 커널에서는 조용히 NaN이 나올 수 있습니다. `torch.cuda.is_available()`이 `True`인 것만으로 GPU가 제대로 동작한다고 판단하지 말고, 실제 forward pass의 NaN 여부까지 확인해야 합니다.
+JetPack 7.2 + Orin Nano 조합에서 확인된 이슈입니다. Orin의 컴퓨트 capability(`sm_87`)가 PyTorch 공식 wheel에 명시적으로 포함돼 있지 않아서, 단순 행렬곱(matmul)은 PTX JIT 컴파일로 정상 동작하지만 transformer/diffusion처럼 복잡한 커널에서는 조용히 NaN이 나올 수 있습니다. `torch.cuda.is_available()`이 `True`인 것만으로 GPU가 제대로 동작한다고 판단하지 말고, 실제 forward pass의 NaN 여부까지 확인해야 합니다.
 
 ```python
 import torch

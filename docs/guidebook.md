@@ -446,11 +446,11 @@ ros2 run open_manipulator_x_pick_place pick_and_place_aruco
 
 ## 7. 4단계 준비 — 젯슨 오린 나노 초기 환경 구축
 
-Stage 4(온보드 VLA)에 들어가기 전, 젯슨 오린 나노 Super Developer Kit(8GB)를 개봉 상태에서 SSH 원격 접속이 가능한 상태까지 세팅합니다. 이 절차를 마치면 모니터·키보드 없이 노트북에서 젯슨을 원격으로 다룰 수 있습니다.
+Stage 4(온보드 VLA)에 들어가기 전, 젯슨 오린 나노 Developer Kit(8GB)를 개봉 상태에서 SSH 원격 접속이 가능한 상태까지 세팅합니다. 이 절차를 마치면 모니터·키보드 없이 노트북에서 젯슨을 원격으로 다룰 수 있습니다.
 
 ### 준비물
 
-- Jetson Orin Nano Super Developer Kit (8GB, P3767-0005 모듈 + P3768-0000 캐리어보드)
+- Jetson Orin Nano Developer Kit (8GB, P3767-0005 모듈 + P3768-0000 캐리어보드)
 - microSD 64GB 이상 UHS-1 **필수** (32GB로 실제 시도해본 결과, JetPack + ROS 2 Jazzy + 워크스페이스 빌드만으로 용량이 부족해 빌드 도중 중단됨 — VLA 패키지·모델 가중치까지 얹으면 32GB로는 불가능)
 - USB 플래시드라이브 16GB 이상 (설치 미디어용 — JetPack 7.2부터 SD카드 이미지 방식 지원 종료)
 - DisplayPort 케이블 또는 DP-HDMI 어댑터 (젯슨은 DP 출력만 지원, USB-C/HDMI 자체 출력 없음)
