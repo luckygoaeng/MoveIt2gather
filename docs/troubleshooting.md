@@ -305,3 +305,58 @@ print("transformer 정상:", not torch.isnan(out.last_hidden_state).any().item()
 | 9 | 노트북에서 `rqt_image_view`/`ros2 topic hz`로 젯슨의 `/image_raw`를 구독해도 화면이 안 뜨고 데이터도 안 옴 (토픽 목록엔 보이는데) | `ros2 topic list`처럼 작은 discovery 패킷은 WiFi/공유기를 넘어가지만, 이미지처럼 큰 메시지(1280x720 raw ~1.8MB, UDP 프래그먼트)는 네트워크 환경에 따라 막히는 경우가 흔함 | 원격 GUI 대신 젯슨에 연결된 DP 모니터에서 직접 `DISPLAY=:0 ros2 run rqt_image_view rqt_image_view` 실행. 계속 원격으로 보고 싶으면 `ros-jazzy-web-video-server`(HTTP/MJPEG, 훨씬 가볍고 방화벽 친화적)로 전환 |
 
 **참고 — 원격 모니터링(`web_video_server`)은 같은 WiFi 안에서만 됨**: 외부(다른 네트워크의 친구 등)에게 보여주려면 `ngrok` 같은 터널링으로 공개 URL을 만들 수는 있으나, 인증 없이 카메라 스트림이 인터넷에 노출되고 랩 네트워크 정책에도 위배될 수 있어 지양. 화면 공유(Zoom/Discord 등)로 대체.
+
+## Stage 4 본편 — SmolVLA 온보드 제로샷 추론 (`lerobot`, `lerobot-ros`)
+
+conda 환경 구축부터 첫 실물 실행까지 겪은 이슈를 순서대로 정리했습니다.
+
+### 환경 설치 (conda + lerobot + lerobot-ros)
+
+| # | 증상 | 원인 | 해결 |
+| --- | --- | --- | --- |
+| 1 | conda env(`vla`, python 3.12) 안에서 `pip install lerobot[smolvla]` 후 `import transformers`가 `ImportError: cannot import name 'is_offline_mode' from 'huggingface_hub'`로 깨짐 | conda python도 3.12라서 시스템 python3.12와 **`~/.local/lib/python3.12/site-packages`(유저 사이트)를 공유**함. `sys.path` 순서상 이 디렉토리가 conda 환경 자체 site-packages보다 먼저 검색돼서, 예전에 시스템에 `--user`로 깔아둔 구버전 torch/transformers/huggingface-hub가 conda 환경 안으로 새어 들어옴 | conda env 활성화 후 `export PYTHONNOUSERSITE=1`로 유저 사이트 공유를 끊음. rclpy는 `PYTHONPATH`(ROS `setup.bash`가 추가) 경로로 들어오므로 이 설정과 무관하게 계속 정상 작동 |
+| 2 | `pip install lerobot[smolvla]` 직후엔 GPU(cu132) torch가 잘 깔려있었는데, 이후 `lerobot-ros`나 우리 패키지를 `pip install`할 때마다 torch가 매번 CPU 또는 일반 PyPI CUDA13 wheel(`torch-2.1x.0`, 젯슨 비전용)로 조용히 덮어써짐 | `lerobot`/`lerobot-robot-ros`가 선언한 `torch` 의존성 범위를 만족시키려고 pip이 PyPI의 일반 torch wheel로 재설치함 — 젯슨 전용 cu132 wheel(`download.pytorch.org/whl/cu132`)은 pip 표준 인덱스에 없어서 이 과정에서 매번 밀려남 | `pip install --force-reinstall torch torchvision --index-url https://download.pytorch.org/whl/cu132`를 **모든 관련 설치가 끝난 맨 마지막에** 실행하는 순서로 고정 (아래 "설치 순서" 참고). `--force-reinstall` 없이 그냥 `pip install torch ...`만 하면 이미 깔린(다른) torch가 버전 조건을 만족한다고 판단해 pip이 아무것도 안 하고 조용히 넘어가므로 반드시 `--force-reinstall` 필요 |
+| 3 | `pip install lerobot-ros` (PyPI) 시 `Could not find a version that satisfies the requirement` | `lerobot-ros`(`ycheng517/lerobot-ros`)는 PyPI에 배포되지 않음. 실제로는 `lerobot_robot_ros`/`lerobot_teleoperator_devices` 두 개의 순수 pip 패키지(poetry-core 빌드, `package.xml` 없음 — ament 패키지 아님)로 구성된 GitHub 레포 | `git clone https://github.com/ycheng517/lerobot-ros ~/lerobot-ros` 후 `pip install -e ./lerobot_robot_ros -e ./lerobot_teleoperator_devices` (README의 `pip install -e lerobot_robot_ros lerobot_teleoperator_devices`처럼 `-e`를 한 번만 쓰면 두 번째 패키지는 일반 PyPI 패키지로 오인되어 설치 실패함 — 각각에 `-e`를 따로 붙여야 함) |
+| 4 | 위 설치 후 `import rclpy`는 되는데 `lerobot_robot_ros`가 내부적으로 쓰는 다른 C++ 확장 모듈에서 `GLIBCXX_3.4.30` 관련 오류 위험 (README에 명시된 알려진 이슈) | conda의 자체 `libstdc++`가 시스템 것보다 오래된 경우 rclpy 및 관련 pybind11 확장이 필요한 GLIBCXX 심볼을 못 찾을 수 있음 | `conda install -c conda-forge libstdcxx-ng -y`로 conda 환경의 `libstdc++`를 최신화 (lerobot-ros 공식 README에 명시된 사전조건) |
+| 5 | `lerobot_robot_ros` 설치 시 이미 깔려있던 `lerobot==0.6.0`(smolvla extra 포함)이 자동으로 `lerobot==0.4.4`로 다운그레이드됨 | `lerobot_robot_ros`의 `pyproject.toml`이 `lerobot>=0.4.0,<0.5.0`으로 **하드 고정**돼 있음 — 최신 `lerobot[smolvla]`(0.6.0)와 버전대가 겹치지 않음 | 다행히 `lerobot==0.4.4`에도 `lerobot/policies/smolvla/` 모듈이 정식 포함되어 있어(직접 확인함) 문제 없음. 다만 이 다운그레이드가 `transformers`/`huggingface-hub`도 예전 스냅샷(0.6.0 기준)을 남긴 채로 진행돼서 `huggingface_hub 0.35.3` + `transformers 5.5.4`(0.6.0용) 조합이 되어 아래 6번 에러로 이어짐 |
+| 6 | `import transformers`가 다시 `ImportError: cannot import name 'is_offline_mode' from 'huggingface_hub'`로 깨짐 (2번과 다른 원인) | 5번의 lerobot 다운그레이드 이후에도 `transformers`는 여전히 0.6.0 시절 설치된 5.5.4 버전이라, `huggingface-hub<2.0,>=1.5.0`을 요구하는데 실제로는 0.35.3(0.x대)이 깔려있어 API가 안 맞음 | `pip install "lerobot[smolvla]==0.4.4"`로 **설치된 lerobot 버전에 정확히 맞춰** smolvla extra를 재설치 — `transformers`가 4.57.6으로 내려가면서 huggingface-hub 0.35.3과 호환되는 조합으로 정리됨 (이 과정에서 torch가 또 덮어써지므로 2번 순서 재적용 필요) |
+| 7 | 우리가 만든 신규 패키지(`lerobot_robot_open_manipulator_x`)를 `pip install -e`한 뒤 `import`하면 `<module ... (namespace) from ['/home/csilab/lerobot_robot_open_manipulator_x']>`처럼 **네임스페이스 패키지**로 잡히고, 실제 `config.py`/`robot.py`가 안 보임 | 프로젝트 루트 디렉토리 이름과 그 안의 패키지 디렉토리 이름이 완전히 같은 "flat layout"(`lerobot_robot_open_manipulator_x/lerobot_robot_open_manipulator_x/`)을 쓰면 setuptools의 자동 패키지 탐색이 헷갈려서, `__init__.py`가 있는 안쪽 디렉토리가 아니라 바깥 프로젝트 루트를 패키지로 잘못 인식함 | 표준 **src 레이아웃**으로 변경: `lerobot_robot_open_manipulator_x/src/lerobot_robot_open_manipulator_x/`, `pyproject.toml`에 `[tool.setuptools.packages.find] where = ["src"]` 지정 |
+| 8 | `lerobot.utils.import_utils.register_third_party_plugins()`(서드파티 로봇 자동 등록)를 호출해도 레지스트리가 비어있음 | 이 함수는 설치된 배포판 이름이 `lerobot_robot_`(언더스코어)로 시작하는지 체크하는데, `lerobot_robot_ros`의 실제 배포판 메타데이터 `Name`은 `lerobot-robot-ros`(하이픈)임 — `importlib.metadata`가 pyproject.toml의 표기를 그대로 반영해서, 언더스코어 접두사 매칭이 실패함 (lerobot 쪽의 알려지지 않은 버그로 보임) | 자동 탐색에 의존하지 않고, 로봇 클래스가 필요한 지점(`lerobot-record` 등 CLI 실행)에서 우리 패키지가 `lerobot_robot_ros`를 명시적으로 import하므로 실제 실행에는 지장 없음 — `RobotConfig._choice_registry`를 직접 찍어서 등록 여부를 확인하는 방식으로 우회 검증 |
+
+### 설치 순서 (재현 시 이 순서 그대로)
+
+```bash
+# 1. miniforge 설치, conda env 생성 (python=3.12 고정)
+conda create -n vla python=3.12 -y
+conda activate vla
+export PYTHONNOUSERSITE=1          # 이슈 1
+source /opt/ros/jazzy/setup.bash
+pip install pyyaml                  # rclpy가 필요로 함
+
+# 2. lerobot-ros 사전조건 + 설치
+conda install -c conda-forge libstdcxx-ng -y   # 이슈 4
+git clone https://github.com/ycheng517/lerobot-ros ~/lerobot-ros
+pip install -e ~/lerobot-ros/lerobot_robot_ros -e ~/lerobot-ros/lerobot_teleoperator_devices   # 이슈 3, 5
+
+# 3. lerobot이 실제로 설치된 버전에 맞춰 smolvla extra 재설치
+pip install "lerobot[smolvla]==0.4.4"   # 이슈 6 (설치된 lerobot 버전은 매번 확인)
+
+# 4. 우리 로봇 패키지 설치 (src 레이아웃, 이슈 7)
+pip install -e ~/lerobot_robot_open_manipulator_x --no-deps   # --no-deps로 위 조합을 다시 안 건드림
+
+# 5. 맨 마지막에 젯슨 전용 GPU torch로 재설치 — 반드시 마지막 (이슈 2)
+pip install --force-reinstall torch torchvision --index-url https://download.pytorch.org/whl/cu132
+```
+
+### 첫 실물 실행 (`lerobot-record`)
+
+| # | 증상 | 원인 | 해결 |
+| --- | --- | --- | --- |
+| 9 | `lerobot-record --policy.type=smolvla ...` 실행 시 로봇 연결 전에 `ValueError: Your dataset name does not begin with 'eval_' (...), but a policy is provided` | lerobot이 "정책으로 굴린 실행(평가/추론)"과 "사람이 텔레옵으로 만든 학습 데이터"를 데이터셋 이름 접두사로 구분함 — 정책을 지정하면 `--dataset.repo_id`의 이름 부분이 `eval_`로 시작해야 하는 내부 검증 규칙이 있음 | `--dataset.repo_id=<네임스페이스>/eval_<이름>`처럼 `eval_` 접두사를 붙임. 이 실패는 로봇에 연결하기 전 단계에서 나므로 실물은 전혀 움직이지 않음 |
+| 10 | 같은 `--dataset.repo_id`로 재실행하면 `FileExistsError: ... .cache/huggingface/lerobot/<repo_id>` | `lerobot-record`는 로컬에 그 이름으로 데이터셋 디렉토리를 이미 만들어놨으면 덮어쓰지 않고 에러를 냄 (같은 이름으로 같은 스크립트를 다시 실행해도 마찬가지 — 실제로 이 재실행 때문에 직전 성공 실행의 로그 파일도 같이 덮어써져서 원본 로그를 잃어버림, 별도 파일명으로 저장할 것) | 매 실행마다 `--dataset.repo_id`에 다른 이름(예: 끝에 `_2`, `_3`)을 붙여서 실행. 로그 파일도 실행마다 별도 이름으로 저장 |
+| 11 | 헤드리스 SSH 세션에서 실행하면 시작 직후 `Error trying to import pynput ... failed to acquire X connection: Bad display name ""` 트레이스백이 출력됨 | `lerobot-record`가 키보드로 제어 흐름을 바꾸는 기능(pynput)을 기본으로 초기화하려 하는데, X 디스플레이가 없는 순수 SSH 세션이라 실패함 | **무해함** — 스크립트가 자동으로 감지해서 "Switching to headless mode"로 넘어가고 정상 진행됨(카메라 화면 표시·키보드 제어만 비활성화). 별도 조치 불필요 |
+| 12 | `lerobot.cameras.opencv.OpenCVCameraConfig(index_or_path=0)`가 카메라를 못 열거나, 반대로 Stage 3용 `usb_cam_node_exe`가 갑자기 카메라를 못 엶 | 우리 로봇 설정은 `/dev/video0`를 ROS 토픽이 아니라 OpenCV로 **직접** 여는 방식(lerobot 표준)이라, 같은 장치를 다른 프로세스(`usb_cam_node_exe`)가 이미 잡고 있으면 동시에 못 씀 | VLA 실행 전에 `usb_cam_node_exe`(Stage 3 ArUco용)가 켜져 있지 않은지 확인. 두 데모(Stage 3 ArUco, Stage 4 VLA)는 카메라를 순차적으로만 사용 가능 |
+
+### 실측 성능/동작 관찰
+
+`docs/guidebook.md` 8.9절 참고 — 온보드 실행 성공, 제어 루프 ~10Hz(목표 30Hz 대비 카메라가 병목), 안전 클램프(`max_relative_target=0.1`)가 매 실행 90%대 스텝에서 발동, 3회 시도 모두 제로샷 cross-embodiment 한계로 의미 있는 pick 동작에는 실패(관절4/손목이 상승 후 급반전하는 패턴이 재현됨).

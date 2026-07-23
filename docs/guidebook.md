@@ -5,7 +5,7 @@
 
 - **대상 하드웨어**: OpenManipulator-X (4축), OpenCR 제어보드
 - **소프트웨어**: Ubuntu 24.04 LTS, ROS 2 Jazzy Jalisco, MoveIt 2
-- **완료 상태**: Stage 1 (텔레오퍼레이션) ✅ · Stage 2 (MoveIt2 pick-and-place) ✅ · Stage 3 (ArUco 인식 파이프라인) ✅ · Stage 3 후속 (자동 캘리브레이션 + ArUco pick-and-place, v3) ✅ · Stage 4 준비 (젯슨 오린 나노 초기 환경 구축) ✅ · Stage 4 (젯슨 워크스페이스 클론/빌드 + 실물 하드웨어 리플레이, 64GB 카드) ✅ · Stage 4 본편 (VLA 모델 온보드 추론) 진행 예정
+- **완료 상태**: Stage 1 (텔레오퍼레이션) ✅ · Stage 2 (MoveIt2 pick-and-place) ✅ · Stage 3 (ArUco 인식 파이프라인) ✅ · Stage 3 후속 (자동 캘리브레이션 + ArUco pick-and-place, v3) ✅ · Stage 4 준비 (젯슨 오린 나노 초기 환경 구축) ✅ · Stage 4 (젯슨 워크스페이스 클론/빌드 + 실물 하드웨어 리플레이, 64GB 카드) ✅ · Stage 4 본편 (SmolVLA 온보드 제로샷 추론) ✅
 
 ---
 
@@ -641,9 +641,38 @@ print("transformer 정상:", not torch.isnan(out.last_hidden_state).any().item()
 
 에러가 나면 [troubleshooting.md](./troubleshooting.md)의 "젯슨에서 ROS 2 워크스페이스 빌드" / "젯슨 단독 온보드 — 하드웨어 리플레이" 항목을 확인하세요.
 
-### 8.9 다음 단계 — Stage 4 본편 (VLA 모델)
+### 8.9 Stage 4 본편 — VLA 모델(SmolVLA) 온보드 제로샷 추론
 
-과제 안내문에 제시된 3개 후보 모델 중 **SmolVLA(LeRobot)**를 가장 가벼운(용량·연산량) 모델로 우선 시도하기로 결정. 나머지 2개 모델은 SmolVLA가 안 될 경우에만 검토 예정. 설치는 새 패키지/의존성 추가에 해당하므로, 진행 전 별도로 리포지토리·아키텍처 조사 후 구현 계획을 먼저 정리하고 승인받은 뒤 진행합니다 (CLAUDE.md 워크플로우).
+과제 안내문에 제시된 3개 후보 모델 중 **SmolVLA(LeRobot)**를 가장 가벼운(용량·연산량) 모델로 우선 시도. 온보드에서 실제로 돌아갔고(뒤에 정리한 성능 데이터 참고), 나머지 2개 모델(OpenVLA 7B급, OpenPI 3B급)은 시도하지 않기로 결정 — 젯슨 오린 나노 8GB 메모리로는 로드 자체가 안 될 위험이 크고, SmolVLA가 이미 "안 되는" 상황이 아니라 온보드에서 관측 가능한 결과를 냈기 때문에 굳이 넘어갈 필요가 없다고 판단.
+
+#### 아키텍처
+
+- 설치는 시스템 ROS 2 설치와 완전히 분리된 **conda 환경**(`~/miniforge3`, env명 `vla`, python 3.12 — 시스템 rclpy와 ABI를 맞추기 위해 고정)에서 진행. env 안에서 `source /opt/ros/jazzy/setup.bash`로 시스템 rclpy를 그대로 import해서 씀.
+- **`lerobot-ros`**(`ycheng517/lerobot-ros`, PyPI 미배포 — `~/lerobot-ros`에 git clone 후 `pip install -e`)의 `ROS2Robot`/`ROS2Config`를 서브클래싱해서 우리 로봇 전용 패키지 **`lerobot_robot_open_manipulator_x`**를 신규 작성 (`~/lerobot_robot_open_manipulator_x`, `ros2_ws` 밖 — ament 패키지 아닌 순수 pip 패키지):
+  - `action_type=ActionType.JOINT_TRAJECTORY` → `/arm_controller/joint_trajectory`에 publish (컨트롤러 이름이 코드에 하드코딩되어 있는데 우리 `arm_controller`와 정확히 일치)
+  - `gripper_action_type=GripperActionType.ACTION` → `/gripper_controller/gripper_cmd` action goal (우리 `gripper_controller`=`GripperActionController`와 일치)
+  - 관절 리밋은 `open_manipulator_x_arm.urdf.xacro`에서 그대로 가져옴: joint1 `[-π,π]`, joint2 `[-1.5,1.5]`, joint3 `[-1.5,1.4]`, joint4 `[-1.7,1.97]`, gripper `[-0.011,0.02]` (open/close 값 0.019/-0.01은 SRDF group_state와 동일)
+  - 카메라는 ROS 토픽 구독이 아니라 `lerobot.cameras.opencv.OpenCVCameraConfig(index_or_path=0)`로 `/dev/video0`를 **직접** 열어서 사용 (lerobot 표준 방식 — `usb_cam_node_exe`와는 장치를 동시에 못 쓰므로 같이 켜면 안 됨)
+  - 안전을 위해 `max_relative_target=0.1`(rad)로 스텝당 최대 이동량 클램프 — 실측 결과 아래 참고
+- 실행은 커스텀 스크립트 없이 lerobot 표준 CLI `lerobot-record --robot.type=open_manipulator_x --policy.type=smolvla --policy.pretrained_path=lerobot/smolvla_base ...`로 진행. 데이터셋 이름은 정책 사용 시 `eval_` 접두사 필수(lerobot 자체 검증 룰).
+
+겪은 설치 이슈(conda 격리, 버전 충돌, 패키지 레이아웃 등)는 [troubleshooting.md](./troubleshooting.md)의 "Stage 4 본편" 항목에 정리했습니다.
+
+#### 실측 결과 (2026-07-23, 미세조정 없이 제로샷)
+
+| 항목 | 결과 |
+| --- | --- |
+| 온보드 실행 | ✅ 젯슨 단독으로 추론+ROS 제어 루프 전체 실행 (GPU 사용, `torch==2.13.0+cu132`) |
+| 제어 루프 속도 | 목표 30Hz 중 **실측 평균 ~10Hz** (run2 10.3Hz, run3 10.2Hz, 안정 구간 기준) — 카메라가 이 해상도(1280x720)에서 실측 ~10Hz까지만 나오는 게 병목으로 추정 |
+| 안전 클램프 발동 비율 | run2: 104스텝 중 96회(92%) · run3: 138스텝 중 133회(96%) — 정책이 원래 내려던 이동량이 우리 로봇 기준으로 항상 과도했다는 뜻이고, 클램프가 실질적 안전판 역할을 함 |
+| 관찰된 동작 | 3회 시도(run1~3) 모두 "빨간 상자를 향한 의미 있는 접근/파지"는 성공하지 못함. run1은 팔이 양옆으로 씰룩거림. run2·run3는 초반에 그리퍼가 바닥(물체) 쪽으로 다가가는 듯하다가 어느 순간 급격히 하늘 방향으로 뒤집힘 — joint4(손목) 궤적 그래프에서 상승 후 급반전하는 패턴이 두 실행 모두에서 재현됨(아래 그래프) |
+| 원인 추정 | `smolvla_base`는 OpenManipulator-X를 학습 데이터에서 본 적 없는 제로샷 cross-embodiment 상황 — 관절 이름은 정확히 매핑되어도 출력값의 크기·방향 스케일이 우리 로봇 기준과 안 맞는 것으로 추정 (예상된 결과) |
+
+![SmolVLA 제어 루프 Hz — run2, run3](images/stage4-smolvla-hz-comparison.png)
+
+![joint4(손목) 목표값 추이 — run2, run3](images/stage4-smolvla-joint4-trajectory.png)
+
+과제 요구사항("온보드에서 도는지, 몇 Hz인지, 무엇이 되고 무엇이 안 되는지를 적는 것")은 위 실측으로 충족. 미세조정/타 로봇 관절값 이식 등은 "미세조정 없이 제로샷"이라는 과제 취지에 어긋나 시도하지 않음.
 
 ---
 
@@ -658,3 +687,5 @@ print("transformer 정상:", not torch.isnan(out.last_hidden_state).any().item()
 | Stage 3 — ArUco Pick-and-Place 전체 데모 | [Google Drive](https://drive.google.com/file/d/1U9aCBM_tTKyhq0AbYvM_-bDeTZBCH7t3/view?usp=drive_link) |
 | Stage 4 — 젯슨 온보드 캠 화면 (동작 확인용) | [Google Drive](https://drive.google.com/file/d/1U1JNCLtqICSsCwSccz-v2LYSHA6AVwgt/view?usp=drive_link) |
 | Stage 4 — 젯슨 온보드 Pick-and-Place 데모 (동작 확인용) | [Google Drive](https://drive.google.com/file/d/1XUJyIx5i2XMnKBULv_raDz_S70OY8UFj/view?usp=drive_link) |
+| Stage 4 본편 — SmolVLA 제로샷 실행 run2 | [Google Drive](https://drive.google.com/file/d/1BOmTG8LVB3XfCFSMgp6zzKnyyDFrbAaY/view?usp=drive_link) |
+| Stage 4 본편 — SmolVLA 제로샷 실행 run3 | [Google Drive](https://drive.google.com/file/d/17zq8thvSAxRO6rvzL3pNFxW-ZbJuWXnX/view?usp=drive_link) |
