@@ -285,3 +285,23 @@ print("transformer 정상:", not torch.isnan(out.last_hidden_state).any().item()
 ```
 
 여기서 NaN이 나오면 `TORCH_CUDA_ARCH_LIST="8.7"`로 PyTorch를 소스 빌드해야 할 수 있습니다 (SmolVLA/LeRobot 실행 전 반드시 확인 — VLA 추론 자체가 transformer 기반이라 이 이슈에 직접 영향받음).
+
+**실측 결과 (2026-07-23, `torch==2.13.0+cu132`)**: `matmul`/`bert-base-uncased` forward pass 둘 다 NaN 없이 정상 동작 확인. 소스 빌드는 필요 없었음. 다만 BERT보다 복잡한 VLA 모델(SmolVLA 등)에서는 다시 한번 이 체크를 해보는 것을 권장 — 커널 종류가 다르면 재현될 가능성이 남아있음.
+
+## 젯슨 단독 온보드 — 하드웨어 리플레이 (브링업/캘리브레이션/pick-and-place)
+
+64GB 카드로 워크스페이스를 다 빌드한 뒤, OpenCR·카메라를 노트북에서 뽑아 젯슨에 물리적으로 옮기고 Stage 1~3 로직을 젯슨 단독으로 재현하는 과정(Day 3)에서 겪은 이슈입니다.
+
+| # | 증상 | 원인 | 해결 |
+| --- | --- | --- | --- |
+| 1 | 새 계정에서 브링업 시 `Error opening serial port!` | 젯슨 계정이 `dialout` 그룹에 없어 `/dev/ttyACM0` 접근 권한 없음 | `sudo usermod -aG dialout $USER` 후 **재로그인**(같은 세션에서 `groups` 쳐도 바로 안 보임 — 다음 로그인부터 적용) |
+| 2 | 노트북에서 쓰던 `/dev/video2`가 젯슨엔 없음 | USB 장치 번호는 보드/드라이버마다 다르게 배정됨 — 물리적으로 같은 C920이어도 젯슨에서는 `/dev/video0` | `v4l2-ctl --list-devices`와 `v4l2-ctl -d /dev/videoN --list-formats-ext`로 실제 캡처 노드와 지원 포맷 확인 후 사용 |
+| 3 | ArUco pose의 z값이 캘리브레이션 없이는 안 맞음 (새 계정이라) | `~/.ros/camera_info/default_cam.yaml`은 계정 홈 디렉토리에 저장되는 파일이라 새 젯슨 계정엔 없음. 카메라 자체는 동일 물리 장치라 캘리브레이션 값 재사용 가능 | 노트북에서 `scp`로 그대로 복사: `scp ~/.ros/camera_info/default_cam.yaml csilab@<젯슨IP>:~/.ros/camera_info/` |
+| 4 | 카메라+ArUco를 켜둔 상태로 브링업하면 간헐적으로 `Error opening serial port!` 또는 OpenCR이 중간에 disconnect (`dmesg`에 `usb 1-2.4: USB disconnect` 기록) | `lsusb -t`로 확인해보니 카메라와 OpenCR이 젯슨 보드 내장 USB 허브(`Bus 001 Port 002`)를 공유 — 대역폭/전류 경합으로 순간 끊김 추정. 단, 이후 tmux를 새로 켜고 나서는 동일 조합으로도 재현 안 됨(원인 미확정, 5번 항목과 겹쳤을 가능성) | 확정 해결책은 아니지만: `lsusb -t`로 공유 허브 여부 확인, 가능하면 별도 버스의 포트로 분리. 재현 빈도가 낮다면 5번처럼 세션을 깨끗하게 정리하고 재시도 |
+| 5 | 브링업이 `Waiting for data on 'robot_description' topic to finish initialization`에서 무한 대기 (`ros2_control_node`) | 오래 붙잡고 있던 tmux 세션(여러 번의 재부팅·재시작을 거치며 상태가 꼬였을 가능성)에서 실행 — 정확한 근본 원인은 특정 못 함 | `tmux kill-server`로 세션을 완전히 죽이고 새로 시작하니 동일 명령이 바로 정상 동작. 브링업이 이유 없이 안 될 때는 tmux 세션을 통째로 새로 켜보는 것도 시도해볼 것 |
+| 6 | 캘리브레이션 스크립트가 waypoint 0에서 바로 `Didn't receive robot state ... latest received state has time 0.000000`로 실패 | 브링업을 켠 직후 컨트롤러 매니저가 완전히 초기화되기 전에 캘리브레이션 스크립트를 실행함 (`/joint_states`가 아직 발행되기 전) | 브링업 실행 후 `ros2 topic hz /joint_states`로 안정적으로 값이 찍히는 걸 몇 초 확인한 뒤 스크립트 실행 |
+| 7 | `pick_and_place_aruco` 실행 중 "gripper close" 스텝에서 `Start state out of bounds` (`gripper_left/right_joint`가 SRDF 허용범위 `[-0.011, 0.02]`를 살짝 초과) | 직전 캘리브레이션의 손교시(토크 off → 손으로 이동 → 토크 on) 과정에서 그리퍼를 허용범위 밖으로 벌려둔 채 토크를 다시 켬 | `open_manipulator_teleop`으로 그리퍼를 한 번 움직여서 정상 범위 안으로 복귀시킨 뒤 재실행 (teleop은 MoveIt bounds 체크를 거치지 않고 직접 관절 명령을 보내므로 범위 밖 상태에서도 복귀 가능) |
+| 8 | `pick_and_place_aruco`가 "grasp (descend)" 스텝에서 `Insufficient states in sampleable goal region`으로 실패 | `move_arm_to_pose_seeded()`가 IK는 찾았지만(홈 시드 기준) 그 관절값 조합이 특정 물체 위치에서 자기충돌 상태였던 것으로 추정. `move_group` 중복 실행은 아니었음(확인됨) | 터미널을 새로 켜고 재시도하니 해결 — 정확한 근본 원인은 확정하지 못함. 재현되면 물체를 이전에 성공했던 것과 비슷한 위치에 놓거나 `GRASP_Z_OFFSET`(`pick_and_place_aruco.py`) 조정을 시도할 것 |
+| 9 | 노트북에서 `rqt_image_view`/`ros2 topic hz`로 젯슨의 `/image_raw`를 구독해도 화면이 안 뜨고 데이터도 안 옴 (토픽 목록엔 보이는데) | `ros2 topic list`처럼 작은 discovery 패킷은 WiFi/공유기를 넘어가지만, 이미지처럼 큰 메시지(1280x720 raw ~1.8MB, UDP 프래그먼트)는 네트워크 환경에 따라 막히는 경우가 흔함 | 원격 GUI 대신 젯슨에 연결된 DP 모니터에서 직접 `DISPLAY=:0 ros2 run rqt_image_view rqt_image_view` 실행. 계속 원격으로 보고 싶으면 `ros-jazzy-web-video-server`(HTTP/MJPEG, 훨씬 가볍고 방화벽 친화적)로 전환 |
+
+**참고 — 원격 모니터링(`web_video_server`)은 같은 WiFi 안에서만 됨**: 외부(다른 네트워크의 친구 등)에게 보여주려면 `ngrok` 같은 터널링으로 공개 URL을 만들 수는 있으나, 인증 없이 카메라 스트림이 인터넷에 노출되고 랩 네트워크 정책에도 위배될 수 있어 지양. 화면 공유(Zoom/Discord 등)로 대체.

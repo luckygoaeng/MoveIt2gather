@@ -5,7 +5,7 @@
 
 - **대상 하드웨어**: OpenManipulator-X (4축), OpenCR 제어보드
 - **소프트웨어**: Ubuntu 24.04 LTS, ROS 2 Jazzy Jalisco, MoveIt 2
-- **완료 상태**: Stage 1 (텔레오퍼레이션) ✅ · Stage 2 (MoveIt2 pick-and-place) ✅ · Stage 3 (ArUco 인식 파이프라인) ✅ · Stage 3 후속 (자동 캘리브레이션 + ArUco pick-and-place, v3) ✅ · Stage 4 준비 (젯슨 오린 나노 초기 환경 구축) ✅ · Stage 4 (젯슨 워크스페이스 클론/빌드) 진행 중 — SD카드 용량 초과로 64GB 카드 재설치 후 재개 예정
+- **완료 상태**: Stage 1 (텔레오퍼레이션) ✅ · Stage 2 (MoveIt2 pick-and-place) ✅ · Stage 3 (ArUco 인식 파이프라인) ✅ · Stage 3 후속 (자동 캘리브레이션 + ArUco pick-and-place, v3) ✅ · Stage 4 준비 (젯슨 오린 나노 초기 환경 구축) ✅ · Stage 4 (젯슨 워크스페이스 클론/빌드 + 실물 하드웨어 리플레이, 64GB 카드) ✅ · Stage 4 본편 (VLA 모델 온보드 추론) 진행 예정
 
 ---
 
@@ -513,7 +513,7 @@ ssh <계정명>@<젯슨IP>
 
 ---
 
-## 8. ROS 2 워크스페이스 클론 & 빌드 (젯슨 단독 온보드) — Day 1~2, SD카드 재설치로 중단
+## 8. ROS 2 워크스페이스 클론 & 빌드 (젯슨 단독 온보드) — 64GB 카드로 완료
 
 ### 8.1 작업 방식 — 헤드리스 SSH
 
@@ -590,6 +590,17 @@ python3 -c "import torch; print(torch.cuda.is_available())"
 - 워크스페이스 전체 빌드를 진행하기 전, `nvidia-jetpack` 풀 설치(CUDA 툴킷+cuDNN+TensorRT, 수 GB) 시도 중 **32GB microSD 용량 초과(22G/28G, 82% 사용 시점)로 중단**
 - 64GB microSD로 재굽기 결정 (8.6, 8.7, 8.8 참고) — 재개 시 워크스페이스 전체를 8.4의 5번 명령(`--executor sequential`)으로 처음부터 다시 빌드
 
+### 8.5-2 진행 상황 (Day 3, 2026-07-23 — 64GB 카드, 완료)
+
+- ROS 2는 `ros-jazzy-ros-base` 대신 `ros-jazzy-desktop`으로 설치 (약 3GB 추가 소비 — 64GB 카드에서는 여유가 충분해 문제 없었음. GUI 자체는 헤드리스 아키텍처상 젯슨에서 직접 쓸 일은 없음)
+- 워크스페이스 전체 빌드 성공: `colcon build --symlink-install --executor sequential --parallel-workers 1` — 19개 패키지 전부 `Finished`, 실패 없음 (`open_manipulator_gui`/`open_manipulator_playground`의 stderr 출력은 Qt 빌드 경고로 무해)
+  - 빌드 도중 전원 케이블이 실수로 뽑혀 tmux 세션째로 재부팅된 사고 발생 — colcon의 증분 빌드 덕분에 완료된 패키지는 다시 안 돌고 이어서 진행됨 (자세한 원인/대응은 troubleshooting.md 참고)
+- PyTorch(`torch==2.13.0+cu132`) pip wheel 설치 완료, `nvidia-jetpack` 풀 설치는 생략 (8.6 전략대로)
+- **GPU 검증 완료**: `torch.cuda.is_available()` `True`, `matmul` 정상, `bert-base-uncased` forward pass도 NaN 없이 정상 — Orin(`sm_87`)이 wheel에 명시 지원 안 된다는 경고가 뜨지만(8.7 참고) 실측으로는 PTX JIT 경로가 정상 동작함을 확인. VLA 본편에서 더 복잡한 모델로 재검증 권장은 유효.
+- 최종 디스크 사용량: 19G/57G(35%) — 여유 충분
+- OpenCR(`/dev/ttyACM0`)·로지텍 C920(`/dev/video0`, 노트북 때의 `/dev/video2`와 다름)을 노트북에서 뽑아 젯슨에 물리적으로 연결 완료, `~/.ros/camera_info/default_cam.yaml`은 노트북에서 `scp`로 이전
+- Stage 1(브링업+텔레오퍼레이션) · Stage 3 후속(자동 캘리브레이션 + ArUco pick-and-place)까지 노트북과 동일한 코드로 젯슨 단독 실행 성공 확인. 겪은 이슈(직렬포트 권한, USB 허브 공유, 그리퍼 관절범위 초과 등)는 troubleshooting.md의 "젯슨 단독 온보드 — 하드웨어 리플레이" 항목 참고
+
 ### 8.6 CUDA / PyTorch 설치 전략
 
 `nvidia-jetpack` 풀 설치(시스템 전역 CUDA 툴킷 `nvcc`, 수 GB)는 **당장은 필요하지 않을 가능성이 높습니다**:
@@ -623,12 +634,16 @@ print("transformer 정상:", not torch.isnan(out.last_hidden_state).any().item()
 32GB로는 ROS 2 + 워크스페이스 전체 빌드(GUI/컨트롤러 포함) + PyTorch + SmolVLA/LeRobot + 모델 가중치를 다 감당하지 못했습니다. 젯슨 단독 온보드(8.2)로 가는 이상 워크스페이스를 줄일 수 없으므로 카드 용량을 키우는 쪽으로 대응합니다.
 
 - [x] 64GB microSD로 재굽기 결정
-- [ ] 재굽기 (섹션 7 절차 반복) — 이후에도 용량이 계속 빠듯하면 NVMe SSD 부팅 전환 고려 (Jetson Orin Nano 개발자 키트는 NVMe 부팅 지원, 용량·속도 모두 이득)
-- [ ] 재굽기 후 8.4 절차를 처음부터 순서대로 (기본 도구 → ROS 2 → SSH 키 재발급 → 클론 → **워크스페이스 전체 빌드** → PyTorch)
-- [ ] OpenCR·카메라를 노트북에서 뽑아 젯슨에 물리적으로 연결 (8.2 아키텍처 반영)
-- [ ] 설치 명령 하나 돌릴 때마다 `df -h /` 습관적으로 체크 — 특히 워크스페이스 전체 빌드, `nvidia-jetpack`처럼 용량 큰 패키지 설치 전후
+- [x] 재굽기 (섹션 7 절차 반복)
+- [x] 재굽기 후 8.4 절차를 처음부터 순서대로 (기본 도구 → ROS 2 → SSH 키 재발급 → 클론 → **워크스페이스 전체 빌드** → PyTorch) — 8.5-2 참고
+- [x] OpenCR·카메라를 노트북에서 뽑아 젯슨에 물리적으로 연결 (8.2 아키텍처 반영)
+- [x] 설치 명령 하나 돌릴 때마다 `df -h /` 습관적으로 체크 — 최종 19G/57G(35%)로 여유 확보
 
-에러가 나면 [troubleshooting.md](./troubleshooting.md)의 "젯슨에서 ROS 2 워크스페이스 빌드" 항목을 확인하세요.
+에러가 나면 [troubleshooting.md](./troubleshooting.md)의 "젯슨에서 ROS 2 워크스페이스 빌드" / "젯슨 단독 온보드 — 하드웨어 리플레이" 항목을 확인하세요.
+
+### 8.9 다음 단계 — Stage 4 본편 (VLA 모델)
+
+과제 안내문에 제시된 3개 후보 모델 중 **SmolVLA(LeRobot)**를 가장 가벼운(용량·연산량) 모델로 우선 시도하기로 결정. 나머지 2개 모델은 SmolVLA가 안 될 경우에만 검토 예정. 설치는 새 패키지/의존성 추가에 해당하므로, 진행 전 별도로 리포지토리·아키텍처 조사 후 구현 계획을 먼저 정리하고 승인받은 뒤 진행합니다 (CLAUDE.md 워크플로우).
 
 ---
 
@@ -641,3 +656,5 @@ print("transformer 정상:", not torch.isnan(out.last_hidden_state).any().item()
 | Stage 2(2) — MoveIt2 Pick-and-Place 전체 시퀀스 | [Google Drive #1](https://drive.google.com/file/d/1Uw4575PrhzrfrSFwYhEzHdP2zxn7AYYV/view?usp=drive_link) · [Google Drive #2](https://drive.google.com/file/d/1qtRa02dMAlS_XRpRkwHJCXmmofkJri9O/view?usp=drive_link) |
 | Stage 3 — 자동 캘리브레이션 | [Google Drive](https://drive.google.com/file/d/17QxlfDrqPBBf16Jz6fXvbErETiMCa5CH/view?usp=drive_link) |
 | Stage 3 — ArUco Pick-and-Place 전체 데모 | [Google Drive](https://drive.google.com/file/d/1U9aCBM_tTKyhq0AbYvM_-bDeTZBCH7t3/view?usp=drive_link) |
+| Stage 4 — 젯슨 온보드 캠 화면 (동작 확인용) | [Google Drive](https://drive.google.com/file/d/1U1JNCLtqICSsCwSccz-v2LYSHA6AVwgt/view?usp=drive_link) |
+| Stage 4 — 젯슨 온보드 Pick-and-Place 데모 (동작 확인용) | [Google Drive](https://drive.google.com/file/d/1XUJyIx5i2XMnKBULv_raDz_S70OY8UFj/view?usp=drive_link) |
