@@ -689,15 +689,62 @@ model = AutoModelForImageTextToText.from_pretrained(
 processor = AutoProcessor.from_pretrained("HuggingFaceTB/SmolVLM2-500M-Video-Instruct")
 ```
 
-#### 실측 결과 (2026-07-23, 미세조정 없이 제로샷)
+#### 1차 결과 — 자유 서술형 질문 (2026-07-23, 미세조정 없이 제로샷)
 
 | 질문 | 답변 |
 | --- | --- |
 | "Where is the red box in this image? Describe its approximate location." | "The red box is on the table." |
 
+![자유 서술형 질문 성공 사례 — 실제 프레임](images/stage4-smolvlm2-freeform-success.jpg)
+
 실제 카메라 프레임에는 로봇 팔, 라즈베리파이 보드와 함께 테이블 중앙 하단에 빨간 상자가 놓여 있었음 — SmolVLM2가 미세조정(YOLO식 라벨 학습) 없이도 처음 보는 물체의 존재와 대략적 위치("테이블 위")를 정확히 인식함을 확인. 다만 예상대로 SmolVLM2는 캡셔닝/QA 특화 모델이라 "테이블 중앙 하단" 같은 구체적 좌표는 나오지 않음 — 정밀 grounding이 필요하면 Grounding DINO 등 전용 모델이 필요.
 
-발표 자료용으로, 자유 서술형 질문에 더해 "이 이미지를 3x3 그리드로 나눴을 때 상자가 어느 칸에 있는지"를 추가로 물어 답변 칸을 이미지 위에 하이라이트로 표시하는 시각화도 추가함(`~/smolvlm_probe.py`) — SmolVLM2가 실제로 낼 수 있는 정확도 수준(대략적 위치)에 맞춘 절충으로, 픽셀 단위 bbox처럼 못 지킬 정밀도를 과장하지 않으면서도 "탐지했다"는 시각적 근거를 보여주기 위함.
+#### 2차 결과 — 9칸(3x3) 그리드 위치 질문: 답변 붕괴(collapse) 발견
+
+발표 자료용으로, 답변 칸을 이미지 위에 하이라이트로 표시하는 시각화를 추가하기 위해 자유 서술형 질문에 더해 "이 이미지를 3x3 그리드(top/middle/bottom × left/center/right, 총 9칸)로 나눴을 때 상자가 어느 칸에 있는지"를 묻는 질문을 추가함(`~/smolvlm_probe.py`, 코드는 아래 참고). 그런데 **카메라 앵글과 실제 상자 위치를 바꿔가며 3번 반복 실행했더니 매번 정확히 "top-right"만 나옴** — 실제 상자 위치나 화면 구도가 완전히 달랐는데도 답이 전혀 바뀌지 않아 이미지와 무관한 고정 답으로 의심됨.
+
+| 실행 | 실제 상자 위치 | 그리드 답변 |
+| --- | --- | --- |
+| 1회차 | 화면 하단 (배경에 큰 빨간 벽 있음) | top-right (배경 빨간 벽을 가리킴) |
+| 2회차 | 화면 좌측 하단 (배경에 큰 빨간 벽 있음) | top-right (역시 배경 빨간 벽을 가리킴) |
+| 3회차 | 화면 정중앙 (배경엔 빨간 벽 없고 케이블만 있음) | top-right (빨간 벽도 없는데 동일한 답) |
+
+![그리드 답변 붕괴 사례 1 — 상자는 좌측 하단인데 배경 빨간 벽을 top-right로 지목](images/stage4-smolvlm2-grid-collapse-1.jpg)
+
+![그리드 답변 붕괴 사례 2 — 상자는 정중앙, 배경엔 빨간 벽조차 없는데도 여전히 top-right](images/stage4-smolvlm2-grid-collapse-2.jpg)
+
+3회차(빨간 배경이 아예 없는 상태에서도 동일 답변)를 통해, 이건 "빨간색 배경에 낚이는" 문제가 아니라 **"9지선다처럼 복잡한 지시문을 500M급 소형 모델에게 강제하면 이미지 내용과 무관하게 답이 고정되는" 현상**으로 잠정 결론.
+
+#### 3차 결과 — 3지선다(좌/중/우)로 단순화 재검증
+
+원인이 "지시문 복잡도"인지 "진짜 위치 인식 실패"인지 가르기 위해, 질문을 "빨간 상자가 왼쪽/가운데/오른쪽 중 어디에 있어?"로 단순화해서 재실행.
+
+| 질문 | 실제 상자 위치 | 답변 |
+| --- | --- | --- |
+| "Is the red box on the left, center, or right side of the image?" | 화면 정중앙 | "right" (오답, 자유서술 답도 동일 프레임에서 "left"로 서로 모순) |
+
+![3지선다 단순화 재검증 — 답은 이미지 따라 바뀌지만(붕괴 해소) 여전히 부정확 (실제는 정중앙, 답은 right)](images/stage4-smolvlm2-simplified-3way.jpg)
+
+붕괴 현상(매번 동일 답)은 사라져서 지시문 단순화가 그 문제는 해결했지만, **정확도 자체는 여전히 낮음**(정중앙을 "right"라고 오답) — 즉 "지시문이 복잡해서 못 하는 것"과 "애초에 정밀 위치 인식 능력이 약한 것" 두 원인이 같이 있었던 것으로 정리.
+
+#### 최종 결론
+
+- SmolVLM2-500M은 "물체가 있는지/대략 어디 있는지"(자유 서술) 수준의 제로샷 인식은 미세조정 없이도 성공
+- "정확한 칸/좌표"를 강제로 답하게 하는 구조화된 질문에는 신뢰할 수 없음 — 특히 선택지가 많아지면(9지선다) 이미지를 무시하고 답이 고정되는 현상까지 관찰됨
+- 배경이 어수선하거나(빨간 벽 등 색이 비슷한 다른 물체) 조명이 나쁜 게 원인의 전부는 아님을 3회차·4회차 실험으로 확인 — 배경에 빨간 물체가 없는 상황에서도 오답이 나왔기 때문
+- 이는 SmolVLM2가 애초에 캡셔닝/QA 특화 모델이고 Grounding DINO류의 전용 grounding 모델이 아니라는, 테스트 시작 전부터 예상했던 한계와 일치하는 결과
+
+#### 테스트 스크립트 (재현용 코드, 저장소에는 포함하지 않음)
+
+`~/smolvlm_probe.py`(젯슨 로컬, 순수 진단용이라 저장소에는 커밋하지 않음)의 핵심 로직 — 카메라 프레임 캡처 → 질문 2개(자유 서술 + 좌/중/우 3지선다) → 답변 파싱 → 해당 영역을 이미지에 반투명 하이라이트로 표시:
+
+```python
+messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": question}]}]
+prompt = processor.apply_chat_template(messages, add_generation_prompt=True)
+inputs = processor(text=prompt, images=[image], return_tensors="pt").to("cuda", dtype=torch.bfloat16)
+generated_ids = model.generate(**inputs, max_new_tokens=100)
+answer = processor.batch_decode(generated_ids, skip_special_tokens=True)[0].split("Assistant:")[-1].strip()
+```
 
 겪은 이슈(모델 다운로드 stall 등)는 [troubleshooting.md](./troubleshooting.md)의 "SmolVLM2 단독 인식 테스트" 항목 참고.
 
