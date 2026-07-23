@@ -1,0 +1,16 @@
+[project]
+name = "lerobot_robot_open_manipulator_x"
+version = "0.1.0"
+description = "LeRobot ROS 2 robot config for OpenManipulator-X (ros2_control + JointTrajectoryController + GripperActionController)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "lerobot_robot_ros",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
