@@ -360,3 +360,16 @@ pip install --force-reinstall torch torchvision --index-url https://download.pyt
 ### 실측 성능/동작 관찰
 
 `docs/guidebook.md` 8.9절 참고 — 온보드 실행 성공, 제어 루프 ~10Hz(목표 30Hz 대비 카메라가 병목), 안전 클램프(`max_relative_target=0.1`)가 매 실행 90%대 스텝에서 발동, 3회 시도 모두 제로샷 cross-embodiment 한계로 의미 있는 pick 동작에는 실패(관절4/손목이 상승 후 급반전하는 패턴이 재현됨).
+
+## SmolVLM2 단독 인식 테스트 (`docs/guidebook.md` 8.10절)
+
+SmolVLA가 내부적으로 쓰는 VLM(`HuggingFaceTB/SmolVLM2-500M-Video-Instruct`)만 단독으로 불러와 순수 인식 테스트를 하는 과정에서 겪은 이슈.
+
+| # | 증상 | 원인 | 해결 |
+| --- | --- | --- | --- |
+| 1 | `AutoModelForImageTextToText.from_pretrained(...)`로 모델(가중치 ~2GB) 다운로드 중 정확히 같은 바이트 지점(2029990624)에서 두 번 연속 멈춤. 프로세스는 살아있고(`ps`상 sleeping) `Ctrl+C`(SIGINT)에도 반응 없이 그대로 멈춰있음 | `hf-xet`(허깅페이스의 청크 병렬 다운로드 가속 라이브러리, `huggingface_hub`가 기본으로 사용)가 여러 커넥션으로 파일을 나눠 받는데, 그중 하나가 CLOSE-WAIT 상태로 죽어버리면 전체 다운로드가 멈춤 — `ss -tp`로 확인해보니 원격 서버는 이미 연결을 닫았는데(`CLOSE-WAIT`) 로컬에서 그걸 못 알아채고 무한 대기 | `HF_HUB_DISABLE_XET=1` 환경변수로 Xet 가속 다운로더를 끄고 일반 HTTP 다운로드로 전환 (패키지 설치/삭제 불필요). 멈춘 프로세스는 `Ctrl+C`로 안 죽으므로 `kill -9 <pid>`로 강제 종료 후, `~/.cache/huggingface/hub/models--*/blobs/*.incomplete`와 `.locks/*/*.lock`을 지우고 재시도 |
+| 2 | 모델 로드 시 `UserWarning: Found GPU0 Orin which is of compute capability (CC) 8.7. ... No published PyTorch CUDA builds for release 2.13.0+cu132 support this GPU` 경고 출력 | 8.7절(`torch.cuda.is_available()`은 True인데 transformer 출력이 NaN)에서 다룬 것과 같은 근본 원인(Orin `sm_87`이 PyTorch 공식 wheel 목록에 명시적으로 없음) — 이번엔 SmolVLM2(Idefics3 계열) 로드 시점에 경고로 표면화됨 | `torch.cuda.is_available()`이 `True`이고 실제로 답변도 정상적으로 생성됐으므로(NaN 없음) 이 케이스에선 무해한 경고로 확인됨. 다만 8.7절 NaN 체크 스니펫으로 한 번 더 확인하는 습관을 들일 것 — 모델마다 재현 여부가 다를 수 있음 |
+
+### 실측 결과
+
+`docs/guidebook.md` 8.10절 참고 — "Where is the red box in this image?" 질문에 SmolVLM2가 "The red box is on the table."로 정확히 응답, 미세조정 없이 새 카테고리 인식 가능함을 확인.

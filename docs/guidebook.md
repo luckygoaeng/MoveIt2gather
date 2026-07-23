@@ -674,6 +674,33 @@ print("transformer 정상:", not torch.isnan(out.last_hidden_state).any().item()
 
 과제 요구사항("온보드에서 도는지, 몇 Hz인지, 무엇이 되고 무엇이 안 되는지를 적는 것")은 위 실측으로 충족. 미세조정/타 로봇 관절값 이식 등은 "미세조정 없이 제로샷"이라는 과제 취지에 어긋나 시도하지 않음.
 
+### 8.10 SmolVLM2 단독 인식 테스트 — VLM만 떼어내서 제로샷 인식 확인
+
+8.9의 SmolVLA는 VLA(비전-언어-액션) 전체 파이프라인이라 end-to-end로 동작하는 탓에, 중간에 "물체를 실제로 인식했는지"가 액션 실패(관절4 급반전 등) 뒤에 가려져 안 보임. 그래서 SmolVLA가 내부적으로 쓰는 VLM(`HuggingFaceTB/SmolVLM2-500M-Video-Instruct`)만 단독으로 떼어내, 학습 데이터에 없던 물체(빨간 상자 = 라즈베리파이 3B 패키지 박스)를 카메라 프레임에서 찾아낼 수 있는지만 순수 인식 테스트로 확인. 로봇은 전혀 움직이지 않음(cv2로 `/dev/video0` 직접 오픈, ROS2 미사용).
+
+로딩 API는 `lerobot/policies/smolvla/smolvlm_with_expert.py` 소스에서 직접 확인:
+
+```python
+from transformers import AutoModelForImageTextToText, AutoProcessor
+model = AutoModelForImageTextToText.from_pretrained(
+    "HuggingFaceTB/SmolVLM2-500M-Video-Instruct",
+    torch_dtype="bfloat16", low_cpu_mem_usage=True,
+).to("cuda")
+processor = AutoProcessor.from_pretrained("HuggingFaceTB/SmolVLM2-500M-Video-Instruct")
+```
+
+#### 실측 결과 (2026-07-23, 미세조정 없이 제로샷)
+
+| 질문 | 답변 |
+| --- | --- |
+| "Where is the red box in this image? Describe its approximate location." | "The red box is on the table." |
+
+실제 카메라 프레임에는 로봇 팔, 라즈베리파이 보드와 함께 테이블 중앙 하단에 빨간 상자가 놓여 있었음 — SmolVLM2가 미세조정(YOLO식 라벨 학습) 없이도 처음 보는 물체의 존재와 대략적 위치("테이블 위")를 정확히 인식함을 확인. 다만 예상대로 SmolVLM2는 캡셔닝/QA 특화 모델이라 "테이블 중앙 하단" 같은 구체적 좌표는 나오지 않음 — 정밀 grounding이 필요하면 Grounding DINO 등 전용 모델이 필요.
+
+발표 자료용으로, 자유 서술형 질문에 더해 "이 이미지를 3x3 그리드로 나눴을 때 상자가 어느 칸에 있는지"를 추가로 물어 답변 칸을 이미지 위에 하이라이트로 표시하는 시각화도 추가함(`~/smolvlm_probe.py`) — SmolVLM2가 실제로 낼 수 있는 정확도 수준(대략적 위치)에 맞춘 절충으로, 픽셀 단위 bbox처럼 못 지킬 정밀도를 과장하지 않으면서도 "탐지했다"는 시각적 근거를 보여주기 위함.
+
+겪은 이슈(모델 다운로드 stall 등)는 [troubleshooting.md](./troubleshooting.md)의 "SmolVLM2 단독 인식 테스트" 항목 참고.
+
 ---
 
 ## 9. 데모 영상
